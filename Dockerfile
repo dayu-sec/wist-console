@@ -9,7 +9,7 @@ COPY src ./src
 COPY README.md LICENSE ./
 RUN cargo build --release --locked
 
-FROM busybox:stable AS busybox
+FROM busybox:stable-musl AS busybox
 
 FROM debian:bookworm-slim
 
