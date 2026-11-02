@@ -1,0 +1,23 @@
+# wist-console 示例配置（本地联调口径）
+#
+# 生产由 `wist-console-stack` 渲染；密钥只放 `${SEC_...}`，不写在这里。
+
+[server]
+listen_addr = "127.0.0.1:19200"
+
+[auth]
+# ingress：入口（VPN / 堡垒机 / 反代）必须注入操作者头；dev：本机联调不校验。
+mode = "dev"
+operator_header = "x-console-operator"
+
+# 到证据服务的身份：BFF 持有的**唯一**凭据来源，浏览器不接受这三项传参。
+[evidence]
+base_url = "http://127.0.0.1:19174"
+tenant = "t-001"
+scopes = ["evidence:read"]
+max_sensitivity = "paths"
+timeout_secs = 10
+
+# 资产拓扑（P0 只用于探活；页面本体由 atlas-web 同源嵌在 /atlas/）
+# [atlas]
+# base_url = "http://127.0.0.1:18080"
