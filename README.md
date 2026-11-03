@@ -51,5 +51,16 @@ cargo run -- console.example.toml
 ```bash
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
-docker build -t wist-console:dev .
 ```
+
+镜像是**打包预编译二进制**（与 `wist-gateway` 同构，不在镜像里编译）：
+
+```bash
+# Linux 开发机：先编原生二进制再打包
+cargo build --release --locked --target aarch64-unknown-linux-gnu
+mkdir -p docker/arm64 && cp target/aarch64-unknown-linux-gnu/release/wist-console docker/arm64/
+docker build -t wist-console:dev docker
+```
+
+日常直接用 CI 产物：`ghcr.io/dayu-sec/wist-console:v0.1.2-alpha`。
+镜像以 `10001:10001` 运行；挂进来的配置 0644，`sec-value.yml` 0640 且属主为 10001。

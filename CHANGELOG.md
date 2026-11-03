@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 0.1.2 · 2026-11-02
+
+- 镜像构建改用 `wist-gateway` 的同一套做法：release 流水线按平台**原生**编译二进制，
+  镜像只打包 `docker/amd64` / `docker/arm64`，不再在镜像内编译。
+- 运行镜像改为 `ubuntu:24.04` + `busybox-static`，uid 固定 10001。
+- GitHub Release 附带三个平台的原生二进制 tarball。
+
+## 0.1.1 · 2026-11-02
+
+- 修正运行时镜像：`busybox:stable` 需要 glibc 2.38，bookworm 只有 2.36，容器健康检查会
+  直接报 `GLIBC_2.38 not found`；改用静态的 `busybox:stable-musl`。
+
 ## 0.1.0 · 2026-11-02
 
 首个骨架：计算区运维台的 BFF。
