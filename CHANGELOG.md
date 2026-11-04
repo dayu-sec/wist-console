@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.1.7 · 2026-11-04
+
+- 新增 `GET /api/evidence/{artifact_id}/content`：代理读正文。
+  证据服务 `objects.kind = file` 时不签发预签名 URL（`:presign` 回 501），页面改用这条拿原文；
+  BFF 依旧不缓存、不落盘，浏览器依旧不持任何凭据。
+
 ## 0.1.6 · 2026-11-04
 
 - 接口可用性变成**可观测的功能**：`/api/health.interfaces[]` 每条多一个 `covers`，

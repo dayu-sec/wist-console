@@ -34,6 +34,11 @@ pub fn router(state: AppState) -> Router {
             "/api/evidence/{artifact_id}",
             get(get_evidence).post(presign_evidence),
         )
+        // 代理读正文：预签名不可用的部署（证据服务 objects.kind = file）走这条。
+        .route(
+            "/api/evidence/{artifact_id}/content",
+            get(get_evidence_content),
+        )
         .with_state(state)
 }
 
@@ -227,6 +232,27 @@ async fn get_evidence(
 /// `POST /api/evidence/{artifact_id}:presign`。
 ///
 /// 与证据服务同一条路由技巧：`{artifact_id}` 会把 `art_x:presign` 整段吃下来。
+/// `GET /api/evidence/{artifact_id}/content`：原文代理读。
+///
+/// 本地文件存储（`objects.kind = file`）不签发预签名 URL，页面就用这条拿正文：
+/// BFF 带自己的身份去证据服务取原文，浏览器始终不碰任何凭据。
+async fn get_evidence_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(artifact_id): Path<String>,
+) -> Response {
+    if let Err(err) = require_operator(&state, &headers) {
+        return err.into_response();
+    }
+    let Some(artifact_id) = valid_artifact_id(&artifact_id) else {
+        return not_found();
+    };
+    match state.evidence.content(artifact_id).await {
+        Ok(response) => passthrough(response),
+        Err(err) => upstream_failed(err),
+    }
+}
+
 async fn presign_evidence(
     State(state): State<AppState>,
     headers: HeaderMap,

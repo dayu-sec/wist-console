@@ -20,6 +20,9 @@ GET  /api/evidence?kind=&subject_id=&since=&limit=&cursor=
 GET  /api/evidence/{artifact_id}
      → 透传证据服务的索引行
 
+GET  /api/evidence/{artifact_id}/content
+     → 代理读正文（本地文件模式没有预签名时走这条）
+
 POST /api/evidence/{artifact_id}:presign
      → 透传证据服务的 { artifact_id, url, expires_in_seconds, expires_at }
 

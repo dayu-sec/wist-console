@@ -77,6 +77,11 @@ async fn stub_presign(Path(raw): Path<String>) -> axum::Json<Value> {
     }))
 }
 
+/// 代理读正文：证据服务直接把原文交回来（本地文件模式没有签名 URL）。
+async fn stub_content(Path(artifact_id): Path<String>) -> axum::Json<Value> {
+    axum::Json(json!({ "artifact_id": artifact_id, "body": "original-report" }))
+}
+
 async fn spawn_stub() -> String {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -84,6 +89,10 @@ async fn spawn_stub() -> String {
         .route(
             "/internal/evidence/{artifact_id}",
             get(stub_get).post(stub_presign),
+        )
+        .route(
+            "/internal/evidence/{artifact_id}/content",
+            get(stub_content),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -267,4 +276,32 @@ async fn atlas_is_probed_when_configured() {
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["sources"]["atlas"]["status"], "ok");
+}
+
+#[tokio::test]
+async fn content_is_proxied_through_the_bff() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/art_01ABC/content")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 原文由 BFF 从证据服务取回、原样交出；浏览器不碰预签名 URL。
+    assert_eq!(body["artifact_id"], "art_01ABC");
+    assert_eq!(body["body"], "original-report");
+}
+
+#[tokio::test]
+async fn content_requires_the_operator_header() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/art_01ABC/content")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = call(&app, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

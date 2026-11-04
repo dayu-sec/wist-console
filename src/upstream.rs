@@ -81,4 +81,14 @@ impl EvidenceClient {
         )
         .await
     }
+
+    /// 代理读正文（`GET /internal/evidence/{id}/content`）。
+    /// 预签名不可用的部署（证据服务 `objects.kind = file`）走这条。
+    pub async fn content(&self, artifact_id: &str) -> Result<UpstreamResponse, String> {
+        self.send(
+            Method::GET,
+            &format!("/internal/evidence/{artifact_id}/content"),
+        )
+        .await
+    }
 }
