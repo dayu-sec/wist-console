@@ -12,7 +12,7 @@
 ```text
 GET  /api/health
      → { status, sources: { evidence|atlas|metrics|devices: { status, detail? } },
-         interfaces: [{ id, label, url?, status, detail?, latency_ms?, checked_at_ms? }] }
+         interfaces: [{ id, label, covers, url?, status, detail?, latency_ms?, checked_at_ms? }] }
 
 GET  /api/evidence?kind=&subject_id=&since=&limit=&cursor=
      → 透传证据服务的 { artifacts, next_cursor }
@@ -29,8 +29,8 @@ GET  /api/integration
 ```
 
 `sources` 是「这个域接没接上」；`interfaces` 是「这条接口此刻通不通」——逐条探活
-（`evidence_read` / `evidence_write` / `atlas`），带延迟与检查时间。三个探活并发发，
-一个上游挂掉不会拖长另外两个；没配地址的接口返回 `not_configured`，并说明缺哪个配置项。
+（`evidence_read` / `evidence_write` / `atlas`），带延迟、检查时间与 `covers`（这次到底验到了哪一层）。
+三个探活并发发，一个上游挂掉不会拖长另外两个；没配地址的接口返回 `not_configured`，并说明缺哪个配置项。
 
 ## 三条纪律
 

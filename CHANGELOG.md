@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.1.6 · 2026-11-04
+
+- 接口可用性变成**可观测的功能**：`/api/health.interfaces[]` 每条多一个 `covers`，
+  写明这一次探活验到了哪一层（页面直接展示，不让「绿」含糊）。
+- 证据读端点改用**真读**探活（`GET /internal/evidence?limit=1`，带服务身份）：
+  鉴权、租户/敏感度闸与 PG 索引都会被验到；不再只戳 `/healthz`。
+- 写端点探活只验端口就绪，**不发测试写入**（不往证据库塞垃圾）。
+
 ## 0.1.5 · 2026-11-04
 
 - `/api/health` 新增 `interfaces`：逐条探活 `evidence_read` / `evidence_write` / `atlas`，

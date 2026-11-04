@@ -42,11 +42,14 @@ async fn healthz() -> Json<serde_json::Value> {
 }
 
 /// 聚合各数据源的就绪度。`not_configured` 不是错误 —— 是「这个域还没接」。
+///
+/// `interfaces` 是给「接口可用性」页用的：每个条目要么是一次真请求的结果，
+/// 要么是「没配地址」。`covers` 写清楚这一次请求到底验到了哪一层——
+/// 运维看「绿」时需要知道它绿的是什么。
 #[derive(serde::Serialize)]
 struct Health {
     status: &'static str,
     sources: serde_json::Value,
-    /// 逐个接口的可用性（写端点 / 读端点 / atlas）：状态 + 延迟 + 最近检查时间。
     interfaces: serde_json::Value,
 }
 
@@ -55,19 +58,6 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return err.into_response();
     }
 
-    let evidence = match state.evidence.list(Some("limit=1")).await {
-        Ok(response) if response.status.is_success() => json!({ "status": "ok" }),
-        Ok(response) => json!({
-            "status": "unavailable",
-            "detail": format!("证据服务回了 {}", response.status.as_u16()),
-        }),
-        Err(err) => json!({ "status": "unavailable", "detail": err }),
-    };
-
-    let read_url = Some(format!(
-        "{}/healthz",
-        state.config.evidence.base_url.trim_end_matches('/')
-    ));
     let write_url = state.config.integration.sink_health_url.clone();
     let atlas_url = state
         .config
@@ -77,17 +67,13 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
     // 并发探活：一个上游挂掉不该把另外两个的延迟一起拖长。
     let (read_iface, write_iface, atlas_iface) = tokio::join!(
-        probe_opt(
-            &state.http,
-            "evidence_read",
-            "证据读端点（元数据 / 预签名）",
-            read_url,
-            "未配置 evidence.base_url",
-        ),
+        probe_evidence_read(&state),
         probe_opt(
             &state.http,
             "evidence_write",
-            "证据写端点（数据面 sink）",
+            "证据写端点",
+            "BFF → 证据写监听：端口就绪。不发写入（不往证据库里塞测试数据），
+数据面到该地址的网络可达性只能由数据面自己验证。",
             write_url,
             "未配置 integration.sink_health_url（BFF 视角的探活地址）",
         ),
@@ -95,12 +81,14 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
             &state.http,
             "atlas",
             "资产拓扑 API",
+            "BFF → 资产拓扑：`/healthz` 进程就绪（不查 PG，避免探活变成一次业务查询）。",
             atlas_url,
             "未配置 atlas.base_url",
         ),
     );
 
-    // `sources.atlas` 不再单独发一次请求：直接由刚才那次探活的结果派生。
+    // `sources` 由同一次探活派生，不再重复发请求。
+    let evidence = source_from(&read_iface);
     let atlas = source_from(&atlas_iface);
     let interfaces = vec![read_iface, write_iface, atlas_iface];
 
@@ -332,22 +320,32 @@ async fn probe_opt(
     http: &reqwest::Client,
     id: &str,
     label: &str,
+    covers: &str,
     target: Option<String>,
     missing_detail: &str,
 ) -> serde_json::Value {
     match target {
-        Some(url) => probe(http, id, label, &url).await,
-        None => json!({
-            "id": id,
-            "label": label,
-            "status": "not_configured",
-            "detail": missing_detail,
-        }),
+        Some(url) => probe(http, id, label, covers, &url).await,
+        None => entry(
+            id,
+            label,
+            covers,
+            None,
+            "not_configured",
+            Some(missing_detail.to_string()),
+            None,
+        ),
     }
 }
 
 /// 单接口探活：状态 + 延迟 + 检查时间。错误信息截断，避免把整段 reqwest 报错塞进页面。
-async fn probe(http: &reqwest::Client, id: &str, label: &str, url: &str) -> serde_json::Value {
+async fn probe(
+    http: &reqwest::Client,
+    id: &str,
+    label: &str,
+    covers: &str,
+    url: &str,
+) -> serde_json::Value {
     let started = std::time::Instant::now();
     let result = http
         .get(url)
@@ -355,38 +353,108 @@ async fn probe(http: &reqwest::Client, id: &str, label: &str, url: &str) -> serd
         .send()
         .await;
     let latency_ms = started.elapsed().as_millis() as u64;
-    let checked_at_ms = std::time::SystemTime::now()
+    match result {
+        Ok(response) if response.status().is_success() => {
+            entry(id, label, covers, Some(url), "ok", None, Some(latency_ms))
+        }
+        Ok(response) => entry(
+            id,
+            label,
+            covers,
+            Some(url),
+            "unavailable",
+            Some(format!("HTTP {}", response.status().as_u16())),
+            Some(latency_ms),
+        ),
+        Err(err) => entry(
+            id,
+            label,
+            covers,
+            Some(url),
+            "unavailable",
+            Some(truncate(&err.to_string())),
+            Some(latency_ms),
+        ),
+    }
+}
+
+/// 读端点用**真读**探活（`limit=1`）：鉴权、租户/敏感度闸、PG 索引都会走到，
+/// 比只戳 `/healthz` 有意义——读端点挂了，证据页就是空的。
+async fn probe_evidence_read(state: &AppState) -> serde_json::Value {
+    const COVERS: &str = "BFF → 证据服务：带服务身份真读一次 `GET /internal/evidence?limit=1`，\
+覆盖鉴权、租户与敏感度闸、PG 索引。这一条挂了，证据页就是空的。";
+    let url = format!(
+        "{}/internal/evidence?limit=1",
+        state.config.evidence.base_url.trim_end_matches('/')
+    );
+    let started = std::time::Instant::now();
+    let result = state.evidence.list(Some("limit=1")).await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(response) if response.status.is_success() => entry(
+            "evidence_read",
+            "证据读端点",
+            COVERS,
+            Some(&url),
+            "ok",
+            None,
+            Some(latency_ms),
+        ),
+        Ok(response) => entry(
+            "evidence_read",
+            "证据读端点",
+            COVERS,
+            Some(&url),
+            "unavailable",
+            Some(format!("HTTP {}", response.status.as_u16())),
+            Some(latency_ms),
+        ),
+        Err(err) => entry(
+            "evidence_read",
+            "证据读端点",
+            COVERS,
+            Some(&url),
+            "unavailable",
+            Some(truncate(&err)),
+            Some(latency_ms),
+        ),
+    }
+}
+
+/// 探活结果统一形状：没配地址时不计延迟/时间（那不是一次检查）。
+fn entry(
+    id: &str,
+    label: &str,
+    covers: &str,
+    url: Option<&str>,
+    status: &str,
+    detail: Option<String>,
+    latency_ms: Option<u64>,
+) -> serde_json::Value {
+    let mut value = json!({
+        "id": id,
+        "label": label,
+        "covers": covers,
+        "status": status,
+    });
+    if let Some(url) = url {
+        value["url"] = json!(url);
+    }
+    if let Some(detail) = detail {
+        value["detail"] = json!(detail);
+    }
+    if let Some(latency_ms) = latency_ms {
+        value["latency_ms"] = json!(latency_ms);
+        value["checked_at_ms"] = json!(now_ms());
+    }
+    value
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0);
-    match result {
-        Ok(response) if response.status().is_success() => json!({
-            "id": id,
-            "label": label,
-            "url": url,
-            "status": "ok",
-            "latency_ms": latency_ms,
-            "checked_at_ms": checked_at_ms,
-        }),
-        Ok(response) => json!({
-            "id": id,
-            "label": label,
-            "url": url,
-            "status": "unavailable",
-            "detail": format!("HTTP {}", response.status().as_u16()),
-            "latency_ms": latency_ms,
-            "checked_at_ms": checked_at_ms,
-        }),
-        Err(err) => json!({
-            "id": id,
-            "label": label,
-            "url": url,
-            "status": "unavailable",
-            "detail": truncate(&err.to_string()),
-            "latency_ms": latency_ms,
-            "checked_at_ms": checked_at_ms,
-        }),
-    }
+        .unwrap_or(0)
 }
 
 fn truncate(text: &str) -> String {

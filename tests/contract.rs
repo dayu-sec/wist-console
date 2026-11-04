@@ -172,7 +172,7 @@ async fn presign_is_passed_through() {
 #[tokio::test]
 async fn health_reports_unconfigured_domains() {
     let base = spawn_stub().await;
-    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let app = api::router(state(config(base.clone(), AuthMode::Ingress)));
     let request = Request::builder()
         .uri("/api/health")
         .header("x-console-operator", "zhangsan")
@@ -185,7 +185,7 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(body["sources"]["metrics"]["status"], "not_configured");
     assert_eq!(body["sources"]["devices"]["status"], "not_configured");
 
-    // 接口可用性：读端点探活打的是证据服务的 `/healthz`（不要求身份），
+    // 接口可用性：读端点探的是一次**真实读**（鉴权 + PG 索引都会走到），
     // 写端点与 atlas 没配地址时显式 `not_configured`。
     let interfaces = body["interfaces"].as_array().expect("interfaces array");
     assert_eq!(interfaces.len(), 3, "{body}");
@@ -193,6 +193,12 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(interfaces[0]["status"], "ok", "{body}");
     assert!(interfaces[0]["latency_ms"].is_u64());
     assert!(interfaces[0]["checked_at_ms"].is_u64());
+    // 读端点探的是一次真读（不是只戳 /healthz），且告诉页面这一次验到了哪一层。
+    assert_eq!(
+        interfaces[0]["url"],
+        format!("{base}/internal/evidence?limit=1")
+    );
+    assert!(!interfaces[0]["covers"].as_str().unwrap_or("").is_empty());
     assert_eq!(interfaces[1]["id"], "evidence_write");
     assert_eq!(interfaces[1]["status"], "not_configured");
     assert_eq!(interfaces[2]["id"], "atlas");
