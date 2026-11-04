@@ -248,7 +248,7 @@ async fn get_evidence_content(
         return not_found();
     };
     match state.evidence.content(artifact_id).await {
-        Ok(response) => passthrough(response),
+        Ok(response) => passthrough_uncached(response),
         Err(err) => upstream_failed(err),
     }
 }
@@ -333,6 +333,21 @@ fn passthrough(response: UpstreamResponse) -> Response {
     builder.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
+    );
+    builder
+}
+
+/// 正文透传：多带两条头。
+/// - `no-store`：证据正文不能被浏览器 / 中间代理缓存（它有过期与保密要求）；
+/// - `nosniff`：正文是 JSON 文件，不能让浏览器猜成 HTML。
+fn passthrough_uncached(response: UpstreamResponse) -> Response {
+    let mut builder = passthrough(response);
+    builder
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    builder.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     builder
 }

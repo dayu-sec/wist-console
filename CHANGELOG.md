@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.1.8 · 2026-11-04
+
+- 代理读正文的响应补 `cache-control: no-store` 与 `x-content-type-options: nosniff`：
+  证据正文不能被浏览器 / 中间代理缓存。
+
 ## 0.1.7 · 2026-11-04
 
 - 新增 `GET /api/evidence/{artifact_id}/content`：代理读正文。

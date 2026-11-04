@@ -305,3 +305,31 @@ async fn content_requires_the_operator_header() {
     let (status, _) = call(&app, request).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn proxied_content_is_not_cacheable() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/art_01ABC/content")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    // 证据正文不能进浏览器 / 中间代理的缓存。
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+}
