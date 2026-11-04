@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 0.1.3 · 2026-11-02
+
+- `/api/health` 的数据源键 `pipeline` 改名 `metrics`（运行指标），与前端路由 `#/metrics` 对齐。
+
 ## 0.1.2 · 2026-11-02
 
 - 镜像构建改用 `wist-gateway` 的同一套做法：release 流水线按平台**原生**编译二进制，

@@ -11,7 +11,7 @@
 
 ```text
 GET  /api/health
-     → { status, sources: { evidence|atlas|pipeline|devices: { status, detail? } } }
+     → { status, sources: { evidence|atlas|metrics|devices: { status, detail? } } }
 
 GET  /api/evidence?kind=&subject_id=&since=&limit=&cursor=
      → 透传证据服务的 { artifacts, next_cursor }

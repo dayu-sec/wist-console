@@ -81,9 +81,9 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         sources: json!({
             "evidence": evidence,
             "atlas": atlas,
-            "pipeline": {
+            "metrics": {
                 "status": "not_configured",
-                "detail": "采集量还没有平台侧聚合（VM 在各网关栈里）",
+                "detail": "运行指标还没有平台侧聚合（VM 在各网关栈里）",
             },
             "devices": {
                 "status": "not_configured",

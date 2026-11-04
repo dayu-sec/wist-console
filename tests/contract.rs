@@ -177,7 +177,7 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["sources"]["evidence"]["status"], "ok");
     assert_eq!(body["sources"]["atlas"]["status"], "not_configured");
-    assert_eq!(body["sources"]["pipeline"]["status"], "not_configured");
+    assert_eq!(body["sources"]["metrics"]["status"], "not_configured");
     assert_eq!(body["sources"]["devices"]["status"], "not_configured");
 }
 
