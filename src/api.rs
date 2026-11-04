@@ -46,6 +46,8 @@ async fn healthz() -> Json<serde_json::Value> {
 struct Health {
     status: &'static str,
     sources: serde_json::Value,
+    /// 逐个接口的可用性（写端点 / 读端点 / atlas）：状态 + 延迟 + 最近检查时间。
+    interfaces: serde_json::Value,
 }
 
 async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -62,23 +64,49 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         Err(err) => json!({ "status": "unavailable", "detail": err }),
     };
 
-    let atlas = match &state.config.atlas {
-        None => json!({ "status": "not_configured", "detail": "未配置 atlas.base_url" }),
-        Some(atlas) => {
-            let url = format!("{}/healthz", atlas.base_url.trim_end_matches('/'));
-            match state.http.get(&url).send().await {
-                Ok(response) if response.status().is_success() => json!({ "status": "ok" }),
-                Ok(response) => json!({
-                    "status": "unavailable",
-                    "detail": format!("atlas 回了 {}", response.status().as_u16()),
-                }),
-                Err(err) => json!({ "status": "unavailable", "detail": format!("{err}") }),
-            }
-        }
-    };
+    let read_url = Some(format!(
+        "{}/healthz",
+        state.config.evidence.base_url.trim_end_matches('/')
+    ));
+    let write_url = state.config.integration.sink_health_url.clone();
+    let atlas_url = state
+        .config
+        .atlas
+        .as_ref()
+        .map(|atlas| format!("{}/healthz", atlas.base_url.trim_end_matches('/')));
+
+    // 并发探活：一个上游挂掉不该把另外两个的延迟一起拖长。
+    let (read_iface, write_iface, atlas_iface) = tokio::join!(
+        probe_opt(
+            &state.http,
+            "evidence_read",
+            "证据读端点（元数据 / 预签名）",
+            read_url,
+            "未配置 evidence.base_url",
+        ),
+        probe_opt(
+            &state.http,
+            "evidence_write",
+            "证据写端点（数据面 sink）",
+            write_url,
+            "未配置 integration.sink_health_url（BFF 视角的探活地址）",
+        ),
+        probe_opt(
+            &state.http,
+            "atlas",
+            "资产拓扑 API",
+            atlas_url,
+            "未配置 atlas.base_url",
+        ),
+    );
+
+    // `sources.atlas` 不再单独发一次请求：直接由刚才那次探活的结果派生。
+    let atlas = source_from(&atlas_iface);
+    let interfaces = vec![read_iface, write_iface, atlas_iface];
 
     Json(Health {
         status: "ok",
+        interfaces: json!(interfaces),
         sources: json!({
             "evidence": evidence,
             "atlas": atlas,
@@ -297,6 +325,84 @@ fn passthrough(response: UpstreamResponse) -> Response {
 
 fn upstream_failed(message: String) -> Response {
     error_response(StatusCode::BAD_GATEWAY, "console_upstream_failed", message)
+}
+
+/// 没配地址的接口直接标 `not_configured`；这是「还没接」，不是故障。
+async fn probe_opt(
+    http: &reqwest::Client,
+    id: &str,
+    label: &str,
+    target: Option<String>,
+    missing_detail: &str,
+) -> serde_json::Value {
+    match target {
+        Some(url) => probe(http, id, label, &url).await,
+        None => json!({
+            "id": id,
+            "label": label,
+            "status": "not_configured",
+            "detail": missing_detail,
+        }),
+    }
+}
+
+/// 单接口探活：状态 + 延迟 + 检查时间。错误信息截断，避免把整段 reqwest 报错塞进页面。
+async fn probe(http: &reqwest::Client, id: &str, label: &str, url: &str) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    let result = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let checked_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    match result {
+        Ok(response) if response.status().is_success() => json!({
+            "id": id,
+            "label": label,
+            "url": url,
+            "status": "ok",
+            "latency_ms": latency_ms,
+            "checked_at_ms": checked_at_ms,
+        }),
+        Ok(response) => json!({
+            "id": id,
+            "label": label,
+            "url": url,
+            "status": "unavailable",
+            "detail": format!("HTTP {}", response.status().as_u16()),
+            "latency_ms": latency_ms,
+            "checked_at_ms": checked_at_ms,
+        }),
+        Err(err) => json!({
+            "id": id,
+            "label": label,
+            "url": url,
+            "status": "unavailable",
+            "detail": truncate(&err.to_string()),
+            "latency_ms": latency_ms,
+            "checked_at_ms": checked_at_ms,
+        }),
+    }
+}
+
+fn truncate(text: &str) -> String {
+    let mut out: String = text.chars().take(180).collect();
+    if out.len() < text.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// 接口探活结果 → 数据源就绪度（只取状态与详情，丢掉延迟这类接口级字段）。
+fn source_from(probe: &serde_json::Value) -> serde_json::Value {
+    match probe.get("detail") {
+        Some(detail) => json!({ "status": probe["status"], "detail": detail }),
+        None => json!({ "status": probe["status"] }),
+    }
 }
 
 fn not_found() -> Response {

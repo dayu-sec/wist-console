@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 0.1.5 · 2026-11-04
+
+- `/api/health` 新增 `interfaces`：逐条探活 `evidence_read` / `evidence_write` / `atlas`，
+  回状态、延迟（`latency_ms`）与最近检查时间（`checked_at_ms`）。三个探活**并发**发，
+  一个上游挂掉不会把另外两条的延迟一起拖长。
+- 新增配置项 `integration.sink_health_url`：**BFF 视角**的写端点探活地址。
+  它与 `integration.sink_url` 不是一回事 —— 后者是给数据面看的（BFF 到不了）。
+  没配时写端点显示 `not_configured` 并说明缺哪个配置项。
+- `sources.atlas` 不再单独发一次探测：直接复用 `interfaces` 里那次结果。
+
 ## 0.1.4 · 2026-11-02
 
 - 新增 `GET /api/integration`：给「数据面接入」页返回写端点、认证方式、允许的 kind，

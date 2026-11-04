@@ -38,6 +38,7 @@ fn config(base_url: String, mode: AuthMode) -> Config {
         atlas: None,
         integration: IntegrationConfig {
             sink_url: None,
+            sink_health_url: None,
             allowed_kinds: vec!["investigation_report".to_string()],
         },
     }
@@ -183,6 +184,41 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(body["sources"]["atlas"]["status"], "not_configured");
     assert_eq!(body["sources"]["metrics"]["status"], "not_configured");
     assert_eq!(body["sources"]["devices"]["status"], "not_configured");
+
+    // 接口可用性：读端点探活打的是证据服务的 `/healthz`（不要求身份），
+    // 写端点与 atlas 没配地址时显式 `not_configured`。
+    let interfaces = body["interfaces"].as_array().expect("interfaces array");
+    assert_eq!(interfaces.len(), 3, "{body}");
+    assert_eq!(interfaces[0]["id"], "evidence_read");
+    assert_eq!(interfaces[0]["status"], "ok", "{body}");
+    assert!(interfaces[0]["latency_ms"].is_u64());
+    assert!(interfaces[0]["checked_at_ms"].is_u64());
+    assert_eq!(interfaces[1]["id"], "evidence_write");
+    assert_eq!(interfaces[1]["status"], "not_configured");
+    assert_eq!(interfaces[2]["id"], "atlas");
+    assert_eq!(interfaces[2]["status"], "not_configured");
+}
+
+#[tokio::test]
+async fn interfaces_are_probed_when_configured() {
+    let base = spawn_stub().await;
+    let mut cfg = config(base.clone(), AuthMode::Ingress);
+    cfg.atlas = Some(AtlasConfig {
+        base_url: base.clone(),
+    });
+    cfg.integration.sink_health_url = Some(format!("{base}/healthz"));
+    let app = api::router(state(cfg));
+    let request = Request::builder()
+        .uri("/api/health")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for entry in body["interfaces"].as_array().expect("interfaces array") {
+        assert_eq!(entry["status"], "ok", "{body}");
+        assert!(entry["latency_ms"].is_u64(), "{body}");
+    }
 }
 
 #[tokio::test]

@@ -32,6 +32,9 @@ pub struct IntegrationConfig {
     /// 数据面能看到的证据写端点（`http://<内网地址>:<端口>/internal/evidence`）。
     /// 没配就不展示 URL，只展示占位符。
     pub sink_url: Option<String>,
+    /// **BFF 视角**的写端点探活地址（容器网络里的地址，通常是 `http://evidence:8080/healthz`）。
+    /// 它与 `sink_url` 不是一回事：`sink_url` 是给数据面看的，BFF 到不了。
+    pub sink_health_url: Option<String>,
     pub allowed_kinds: Vec<String>,
 }
 
@@ -140,6 +143,8 @@ struct RawConfig {
 struct RawIntegration {
     #[serde(default)]
     sink_url: String,
+    #[serde(default)]
+    sink_health_url: String,
     #[serde(default = "default_integration_kinds")]
     allowed_kinds: Vec<String>,
 }
@@ -148,6 +153,7 @@ impl Default for RawIntegration {
     fn default() -> Self {
         Self {
             sink_url: String::new(),
+            sink_health_url: String::new(),
             allowed_kinds: default_integration_kinds(),
         }
     }
@@ -291,6 +297,11 @@ impl RawConfig {
                 } else {
                     Some(expand(env, &self.integration.sink_url)?)
                 },
+                sink_health_url: if self.integration.sink_health_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(expand(env, &self.integration.sink_health_url)?)
+                },
                 allowed_kinds: self.integration.allowed_kinds,
             },
         })
@@ -321,6 +332,8 @@ mod tests {
         assert_eq!(config.evidence.scopes, vec!["evidence:read"]);
         assert_eq!(config.evidence.max_sensitivity, "paths");
         assert!(config.atlas.is_none());
+        assert!(config.integration.sink_url.is_none());
+        assert!(config.integration.sink_health_url.is_none());
     }
 
     #[test]

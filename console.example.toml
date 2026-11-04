@@ -21,3 +21,9 @@ timeout_secs = 10
 # 资产拓扑（P0 只用于探活；页面本体由 atlas-web 同源嵌在 /atlas/）
 # [atlas]
 # base_url = "http://127.0.0.1:18080"
+
+# 「数据面接入」页展示的写端点 + `/api/health` 的接口探活。
+# sink_url 是**数据面视角**的地址（BFF 到不了）；探活另配 sink_health_url。
+# [integration]
+# sink_url = "http://10.0.0.5:18800"
+# sink_health_url = "http://evidence:8080/healthz"
