@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/api/health", get(health))
         .route("/api/evidence", get(list_evidence))
+        .route("/api/integration", get(integration))
         .route(
             "/api/evidence/{artifact_id}",
             get(get_evidence).post(presign_evidence),
@@ -91,6 +92,85 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
             },
         }),
     })
+    .into_response()
+}
+
+/// 展示给运维的「数据面接入」：写端点 + 可直接 copy 的 wparse 配置。
+///
+/// **不回传站点 token**，只回占位符。
+async fn integration(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(err) = require_operator(&state, &headers) {
+        return err.into_response();
+    }
+    let sink_base = state
+        .config
+        .integration
+        .sink_url
+        .clone()
+        .unwrap_or_else(|| "http://<证据服务内网地址>:18800".to_string());
+    let sink_base = sink_base.trim_end_matches('/').to_string();
+    let write_url = format!("{sink_base}/internal/evidence");
+
+    // 注意：`format!` 里的 `{{` / `}}` 是转义的大括号，`${{...}}` 才是字面量 `${...}`。
+    let connector = format!(
+        r#"[[connectors]]
+allow_override = ["endpoint", "username", "password", "headers", "fmt", "batch_size", "timeout_secs", "max_retries"]
+id = "evidence_sink"
+type = "http"
+
+[connectors.params]
+endpoint = "{write_url}"
+method = "POST"
+fmt = "json"
+batch_size = 1
+timeout_secs = 5
+max_retries = 3
+compression = "none"
+username = "${{EVIDENCE_SINK_TOKEN}}"
+password = ""
+
+[connectors.params.headers]
+Content-Type = "application/json"
+"#
+    );
+
+    let sink_group = format!(
+        r#"[sink_group]
+name = "agent-ivsrep-evidence"
+oml = ["agent_uplink_ivsrep"]
+tags = ["biz:agent-ivsrep"]
+batch_size = 1
+batch_timeout_ms = 300
+
+[[sink_group.sinks]]
+name = "evidence"
+connect = "evidence_sink"
+tags = ["sink:evidence"]
+
+[sink_group.sinks.params]
+endpoint = "{write_url}"
+batch_size = 1
+"#
+    );
+
+    Json(json!({
+        "evidence": {
+            "write_url": write_url,
+            "auth": "basic",
+            "username_is_token": true,
+            "tenant": state.config.evidence.tenant,
+            "allowed_kinds": state.config.integration.allowed_kinds,
+            "frame_marker": "IVSREP",
+        },
+        "warp_parse": {
+            "connector": connector,
+            "sink_group": sink_group,
+            "env": {
+                "EVIDENCE_SINK_URL": sink_base,
+                "EVIDENCE_SINK_TOKEN": "<站点 token：与证据服务 sec-value.yml 一致>",
+            },
+        },
+    }))
     .into_response()
 }
 

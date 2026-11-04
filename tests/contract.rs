@@ -15,7 +15,7 @@ use tower::ServiceExt;
 
 use wist_console::api::{self, AppState};
 use wist_console::config::{
-    AtlasConfig, AuthConfig, AuthMode, Config, EvidenceConfig, ServerConfig,
+    AtlasConfig, AuthConfig, AuthMode, Config, EvidenceConfig, IntegrationConfig, ServerConfig,
 };
 use wist_console::upstream::EvidenceClient;
 
@@ -36,6 +36,10 @@ fn config(base_url: String, mode: AuthMode) -> Config {
             timeout_secs: 5,
         },
         atlas: None,
+        integration: IntegrationConfig {
+            sink_url: None,
+            allowed_kinds: vec!["investigation_report".to_string()],
+        },
     }
 }
 
@@ -179,6 +183,32 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(body["sources"]["atlas"]["status"], "not_configured");
     assert_eq!(body["sources"]["metrics"]["status"], "not_configured");
     assert_eq!(body["sources"]["devices"]["status"], "not_configured");
+}
+
+#[tokio::test]
+async fn integration_page_shows_the_sink_contract() {
+    let base = spawn_stub().await;
+    let mut cfg = config(base, AuthMode::Ingress);
+    cfg.integration.sink_url = Some("http://10.0.0.5:18800".to_string());
+    let app = api::router(state(cfg));
+    let request = Request::builder()
+        .uri("/api/integration")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["evidence"]["write_url"],
+        "http://10.0.0.5:18800/internal/evidence"
+    );
+    assert_eq!(body["evidence"]["auth"], "basic");
+    assert_eq!(body["evidence"]["tenant"], "t-001");
+    let connector = body["warp_parse"]["connector"].as_str().unwrap();
+    assert!(connector.contains("evidence_sink"));
+    assert!(connector.contains("http://10.0.0.5:18800/internal/evidence"));
+    // token 只能是占位符，不能把真值回传给浏览器。
+    assert!(connector.contains("${EVIDENCE_SINK_TOKEN}"));
 }
 
 #[tokio::test]

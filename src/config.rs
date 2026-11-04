@@ -21,6 +21,18 @@ pub struct Config {
     pub auth: AuthConfig,
     pub evidence: EvidenceConfig,
     pub atlas: Option<AtlasConfig>,
+    pub integration: IntegrationConfig,
+}
+
+/// 展示给运维的「数据面接入」信息。
+///
+/// 这里**只放公开信息**（写端点、允许的 kind）；站点 token 永远不出现在响应里。
+#[derive(Debug, Clone)]
+pub struct IntegrationConfig {
+    /// 数据面能看到的证据写端点（`http://<内网地址>:<端口>/internal/evidence`）。
+    /// 没配就不展示 URL，只展示占位符。
+    pub sink_url: Option<String>,
+    pub allowed_kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +132,29 @@ struct RawConfig {
     evidence: RawEvidence,
     #[serde(default)]
     atlas: Option<RawAtlas>,
+    #[serde(default)]
+    integration: RawIntegration,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIntegration {
+    #[serde(default)]
+    sink_url: String,
+    #[serde(default = "default_integration_kinds")]
+    allowed_kinds: Vec<String>,
+}
+
+impl Default for RawIntegration {
+    fn default() -> Self {
+        Self {
+            sink_url: String::new(),
+            allowed_kinds: default_integration_kinds(),
+        }
+    }
+}
+
+fn default_integration_kinds() -> Vec<String> {
+    vec!["investigation_report".to_string()]
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +284,14 @@ impl RawConfig {
                     base_url: expand(env, &atlas.base_url)?,
                 }),
                 None => None,
+            },
+            integration: IntegrationConfig {
+                sink_url: if self.integration.sink_url.trim().is_empty() {
+                    None
+                } else {
+                    Some(expand(env, &self.integration.sink_url)?)
+                },
+                allowed_kinds: self.integration.allowed_kinds,
             },
         })
     }

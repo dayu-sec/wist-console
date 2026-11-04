@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.1.4 · 2026-11-02
+
+- 新增 `GET /api/integration`：给「数据面接入」页返回写端点、认证方式、允许的 kind，
+  以及两份可直接 copy 的 wparse 配置（连接器 + sink 分组）。**不返回站点 token**。
+
 ## 0.1.3 · 2026-11-02
 
 - `/api/health` 的数据源键 `pipeline` 改名 `metrics`（运行指标），与前端路由 `#/metrics` 对齐。
