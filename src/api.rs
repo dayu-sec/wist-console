@@ -646,8 +646,8 @@ fn credentials_interface(state: &AppState) -> serde_json::Value {
             "unavailable",
             format!(
                 "收数监听 {listen} 在线，但一条凭据都没登记：先看 cred 页面上这个系统是不是 \
-                 no_endpoint（没地址就永远不会推过来，接入时必须给 --advertise；\
-                 只做人工分发则要显式 --manual），再看 cred 到 {listen} 的可达性"
+                 no_endpoint（没登记地址就永远不会推过来；地址在 cred 页面 / 部署栈里登记，\
+                 不是接入命令的参数），再看 cred 到 {listen} 的可达性"
             ),
         )
     } else {
