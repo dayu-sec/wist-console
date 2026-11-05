@@ -10,6 +10,13 @@
 ## 接口
 
 ```text
+POST /api/login
+     体：{ token } 或 `Authorization: Bearer wcr_…`
+     → { credential_id, subject, roles, audience, expires_at }
+     契约由 `wist-cred-peer`（≥0.5）统一：401 `credential_missing` / `credential_invalid`，
+     403 `role_required`，503 `credential_store_unavailable`。
+     其它接口仍然每请求带 Bearer —— 登录只负责"先确认这串是谁"，不换 session。
+
 GET  /api/health
      → { status, sources: { evidence|atlas|metrics|devices: { status, detail? } },
          interfaces: [{ id, label, covers, url?, status, detail?, latency_ms?, checked_at_ms? }] }

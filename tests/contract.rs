@@ -653,3 +653,109 @@ roles = ["read"]
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 登录端点：把令牌换成身份/权限（由 `wist-cred-peer` 提供契约）。
+///
+/// 这里只验“宿主挂对了、状态码与错误码符合契约”；令牌有效/角色不足/摘要表故障
+/// 由 `wist-cred-peer` 自己的用例覆盖（它才是这段逻辑的归属地）。
+#[tokio::test]
+async fn login_endpoint_reports_the_peer_contract() {
+    fn write_materials(dir: &std::path::Path) {
+        use wist_pki::CertificateAuthority;
+        wist_pki::tls::install_crypto_provider();
+
+        let (authority, ca_pem, _key) = CertificateAuthority::generate("Stub CA").expect("ca");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "console.internal".to_string());
+        let csr = params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("csr pem");
+        let issued = authority
+            .issue_server_certificate(&csr, &["console.internal".to_string()], 3600)
+            .expect("issue");
+        std::fs::write(dir.join("server.crt"), &issued.certificate_pem).expect("cert");
+        std::fs::write(dir.join("server.key"), key.serialize_pem()).expect("key");
+        std::fs::write(dir.join("client-ca.pem"), &ca_pem).expect("ca");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "wist-console-login-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0),
+        {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    write_materials(&dir);
+    let cred_file = dir.join("cred.toml");
+    std::fs::write(
+        &cred_file,
+        r#"
+[identity]
+cert = "server.crt"
+key = "server.key"
+client_ca = "client-ca.pem"
+
+[verify]
+audience = "wist-console"
+allowed_issuers = ["wist-cred"]
+roles = ["read"]
+"#,
+    )
+    .expect("cred.toml");
+
+    let runtime = Arc::new(
+        wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+            file: cred_file,
+            listen_addr: "127.0.0.1:0".to_string(),
+            store_path: dir.join("credentials.json"),
+            required_roles: vec!["read".to_string()],
+        })
+        .expect("credentials"),
+    );
+
+    let base = spawn_stub().await;
+    let mut app_state = state(config(base, AuthMode::Cred));
+    app_state.credentials = Some(runtime);
+    let app = api::router(app_state);
+
+    // 没带令牌 → 401 credential_missing（不是“console_credential_*”：这是登录端点，
+    // 契约由 cred-peer 统一，中心/ingest 接入时同一个语义）。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "credential_missing");
+
+    // 令牌不认识 → 401 credential_invalid（不区分过期/撤销/audience）。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"token":"wcr_nope"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "credential_invalid");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

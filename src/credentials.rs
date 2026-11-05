@@ -197,6 +197,11 @@ impl CredentialRuntime {
         self.listen
     }
 
+    /// 进 console 需要的角色（登录端点的角色闸门用它）。
+    pub fn required_roles(&self) -> &[String] {
+        &self.required_roles
+    }
+
     /// 本服务作为 cred 验证方的运行时（自注册路由要它）。
     pub fn peer(&self) -> Arc<Peer> {
         Arc::clone(&self.peer)

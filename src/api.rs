@@ -47,6 +47,16 @@ pub fn router(state: AppState) -> Router {
         )
         .with_state(state.clone());
 
+    // 登录端点：把一条访问令牌换成「你是谁 + 给了什么角色」。
+    // 契约由 `wist-cred-peer` 统一（0.5 起），宿主只决定挂在哪、要什么角色；
+    // 挂在 503 门**之前**：没材料时连令牌都没得验，应当与业务面一起拒。
+    if let Some(credentials) = state.credentials.as_ref() {
+        router = router.nest(
+            "/api",
+            wist_cred_peer::login_router(credentials.peer(), credentials.required_roles().to_vec()),
+        );
+    }
+
     // 未初始化时只放行 `/__init`（和 `/healthz`）：业务面一律 503 ——
     // 否则会出现“页面能打开但永远 401”的半可用现场。
     router = router.layer(axum::middleware::from_fn_with_state(

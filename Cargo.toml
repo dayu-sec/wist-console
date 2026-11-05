@@ -21,7 +21,8 @@ toml = "1.1"
 # 访问凭据：本服务是 `wist-cred` 的验证方（X）。
 # 与 wist-center 同一套接入：摘要表只存 sha256，收数走 mTLS。
 # 0.4 起有自注册（`[init]` / `/__init`）与 `serve_when_ready`（材料落盘即起监听）。
-wist-cred-peer = "0.4"
+# 本地联调：登录端点（`login_router`）在 0.5 里，发版后切回 `wist-cred-peer = "0.5"`。
+wist-cred-peer = { path = "../wist-cred-peer" }
 # 只有一处用到：把「摘要表读不了」和「令牌不对」分开（错误码是稳定契约）。
 wist-auth = { version = "0.3", features = ["credential"] }
 # 凭据 listener 的 mTLS 握手（与 wist-cred-peer / wist-gwlinkd 同一份实现）。
