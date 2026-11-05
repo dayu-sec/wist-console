@@ -93,7 +93,7 @@ async fn spawn_stub() -> String {
         .route("/health", get(|| async { "OK" }))
         // atlas 的读接口（console 以 `/api/atlas/*` 代理过去）。
         .route(
-            "/hosts",
+            "/api/hosts",
             get(|| async { axum::Json(json!({ "status": "ok", "data": { "hosts": [] } })) }),
         )
         .route("/internal/evidence", get(stub_list))

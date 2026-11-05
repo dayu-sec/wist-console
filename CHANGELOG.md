@@ -11,6 +11,9 @@
 - `auth.mode = "ingress"` 保留：入口已经做了认证、并能保证头不被伪造时可用。
 - 配置 fail-closed：`mode = "cred"` 但缺 `[credentials]`、`cred.toml` 读不到、
   `required_roles` 不在 `[verify].roles` 里 —— 都在**启动期**报错，不带病运行。
+- **资产读接口收进 BFF**：新增 `GET /api/atlas/{*path}` → `{atlas.base_url}/api/{path}`。
+  以前 `/atlas/api/*` 由 nginx 直连 atlas-web，等于给令牌认证留了个后门；
+  现在与其它接口同一道门。只放行 GET，`/internal/*` 与路径穿越一律 400。
 
 ## 0.1.10 · 2026-11-05
 

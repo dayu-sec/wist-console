@@ -333,7 +333,9 @@ async fn proxy_atlas(
         );
     }
 
-    let mut url = format!("{}/{rest}", atlas.base_url.trim_end_matches('/'));
+    // atlas 的读接口都在 `/api/*` 下（写端点是 `/internal/atlas`）。
+    // 前端看到的是 `/atlas/api/hosts`，到这里剩下 `hosts`，补回 `/api` 才是 atlas 的路径。
+    let mut url = format!("{}/api/{rest}", atlas.base_url.trim_end_matches('/'));
     if let Some(query) = query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
         url.push('?');
         url.push_str(query);
