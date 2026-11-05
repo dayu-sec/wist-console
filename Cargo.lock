@@ -2779,7 +2779,9 @@ dependencies = [
 
 [[package]]
 name = "wist-cred-peer"
-version = "0.4.1"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45d3beaa748642fcd9af344442cfe9ca7054e78e988b56f444c30f4626fdf507"
 dependencies = [
  "anyhow",
  "axum",
