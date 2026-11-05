@@ -22,6 +22,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub evidence: Arc<EvidenceClient>,
     pub http: reqwest::Client,
+    /// `auth.mode = "cred"` 时存在；`ingress` 时 `None`。
+    pub credentials: Option<Arc<crate::credentials::CredentialRuntime>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -313,40 +315,94 @@ async fn presign_evidence(
     }
 }
 
-/// 入口身份：`ingress` 模式下必须带操作者头（由 VPN / 堡垒机 / 反代注入）。
+/// 调用方身份：谁在看这个界面（审计日志用）。
+///
+/// - `cred`（默认）：`Authorization: Bearer wcr_…` → 摘要表比对 → 角色判权；
+/// - `ingress`：入口（VPN / 堡垒机 / 反代）已认证，把操作员写在头里。
+///
+/// 没有「不校验」这一档：任何一个分支都必须能说出「这是谁」。
 fn require_operator(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Option<String>, OperatorError> {
-    if state.config.auth.mode == AuthMode::Dev {
-        return Ok(None);
-    }
-    let name = &state.config.auth.operator_header;
-    let value = headers
-        .get(name.as_str())
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match value {
-        Some(operator) => Ok(Some(operator.to_string())),
-        None => Err(OperatorError {
-            header: name.clone(),
-        }),
+    match state.config.auth.mode {
+        AuthMode::Ingress => {
+            let name = &state.config.auth.operator_header;
+            let value = headers
+                .get(name.as_str())
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match value {
+                Some(operator) => Ok(Some(operator.to_string())),
+                None => Err(OperatorError::MissingHeader(name.clone())),
+            }
+        }
+        AuthMode::Cred => {
+            let Some(token) = bearer_token(headers) else {
+                return Err(OperatorError::MissingCredential);
+            };
+            // 配置层保证 `cred` 模式一定有 credentials；这里只是不让 None 静默放行。
+            let Some(verifier) = state.credentials.as_ref() else {
+                log::error!("auth.mode = cred but no credential runtime is wired");
+                return Err(OperatorError::InvalidCredential);
+            };
+            match verifier.verify(token) {
+                Ok(caller) => Ok(Some(caller.subject)),
+                Err(crate::credentials::VerifyError::RoleRequired) => Err(OperatorError::RoleRequired),
+                // 不对外区分「不认识 / 过期 / 撤销 / audience 不符」。
+                Err(crate::credentials::VerifyError::Invalid) => Err(OperatorError::InvalidCredential),
+            }
+        }
     }
 }
 
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// 小结构而不是 `Response`：后者会把 `Result` 撑到上百字节（clippy::result_large_err）。
-struct OperatorError {
-    header: String,
+enum OperatorError {
+    /// `ingress` 模式：入口没注入操作者头。
+    MissingHeader(String),
+    /// `cred` 模式：没带 token。
+    MissingCredential,
+    /// `cred` 模式：token 不认识 / 过期 / 撤销。
+    InvalidCredential,
+    /// `cred` 模式：token 有效，但角色不够（403，不是 401）。
+    RoleRequired,
 }
 
 impl OperatorError {
     fn into_response(self) -> Response {
-        error_response(
-            StatusCode::UNAUTHORIZED,
-            "console_operator_missing",
-            format!("missing ingress operator header {}", self.header),
-        )
+        match self {
+            Self::MissingHeader(header) => error_response(
+                StatusCode::UNAUTHORIZED,
+                "console_operator_missing",
+                format!("missing ingress operator header {header}"),
+            ),
+            Self::MissingCredential => error_response(
+                StatusCode::UNAUTHORIZED,
+                "console_credential_missing",
+                "missing access token: send `Authorization: Bearer <token>`",
+            ),
+            Self::InvalidCredential => error_response(
+                StatusCode::UNAUTHORIZED,
+                "console_credential_invalid",
+                "access token is not valid for this console",
+            ),
+            Self::RoleRequired => error_response(
+                StatusCode::FORBIDDEN,
+                "console_role_required",
+                "access token is valid but does not grant console access",
+            ),
+        }
     }
 }
 

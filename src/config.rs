@@ -19,6 +19,8 @@ const CONFIG_ENV: &str = "WIST_CONSOLE_CONFIG";
 pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
+    /// `auth.mode = "cred"` 时必填；`ingress` 时可有可无。
+    pub credentials: Option<CredentialsConfig>,
     pub evidence: EvidenceConfig,
     pub atlas: Option<AtlasConfig>,
     pub metrics: Option<MetricsConfig>,
@@ -44,17 +46,33 @@ pub struct ServerConfig {
     pub listen_addr: String,
 }
 
-/// `ingress`：入口（VPN / 堡垒机 / 反代）必须注入操作者头；`dev`：本机联调不校验。
+/// `cred`：按 `wist-cred` 签发的 token 认证（`Authorization: Bearer wcr_…`），
+/// 摘要由 cred 通过 mTLS 推过来；`ingress`：入口（VPN / 堡垒机 / 反代）已认证并注入操作者头。
+///
+/// **没有「不校验」这一档**：dev 直通曾经存在，但一个计算区界面「默认谁都能进」是不可接受的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
+    Cred,
     Ingress,
-    Dev,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub mode: AuthMode,
     pub operator_header: String,
+}
+
+/// 访问凭据（`wist-cred` 的验证方 `X`）。
+#[derive(Debug, Clone)]
+pub struct CredentialsConfig {
+    /// 接入命令落的 `cred.toml`（identity + verify 两段都以它为准）。
+    pub file: PathBuf,
+    /// cred 推送摘要的 mTLS 监听（宿主/栈内端口由编排决定）。
+    pub listen_addr: String,
+    /// 摘要表落盘（**只存 sha256**）。
+    pub store_path: PathBuf,
+    /// 进入 console 需要的角色（cred 页面签发时选的角色组合里至少要命中一个）。
+    pub required_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +161,8 @@ struct RawConfig {
     server: RawServer,
     #[serde(default)]
     auth: RawAuth,
+    #[serde(default)]
+    credentials: Option<RawCredentials>,
     evidence: RawEvidence,
     #[serde(default)]
     atlas: Option<RawAtlas>,
@@ -195,6 +215,30 @@ fn default_listen() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawCredentials {
+    /// 接入命令落的 `cred.toml`（必填）。
+    file: String,
+    #[serde(default = "default_credentials_listen")]
+    listen_addr: String,
+    #[serde(default = "default_credentials_store")]
+    store_path: String,
+    #[serde(default = "default_required_roles")]
+    required_roles: Vec<String>,
+}
+
+fn default_credentials_listen() -> String {
+    "0.0.0.0:3103".to_string()
+}
+
+fn default_credentials_store() -> String {
+    "state/credentials.json".to_string()
+}
+
+fn default_required_roles() -> Vec<String> {
+    vec!["read".to_string()]
+}
+
+#[derive(Debug, Deserialize)]
 struct RawAuth {
     #[serde(default = "default_auth_mode")]
     mode: String,
@@ -212,7 +256,8 @@ impl Default for RawAuth {
 }
 
 fn default_auth_mode() -> String {
-    "ingress".to_string()
+    // 默认走凭据：没配 `[credentials]` 就在启动时报错，而不是默默退化成「谁都能进」。
+    "cred".to_string()
 }
 
 fn default_operator_header() -> String {
@@ -258,10 +303,15 @@ struct RawMetrics {
 impl RawConfig {
     fn resolve(self, env: &EnvDict) -> anyhow::Result<Config> {
         let mode = match self.auth.mode.trim() {
+            "cred" => AuthMode::Cred,
             "ingress" => AuthMode::Ingress,
-            "dev" => AuthMode::Dev,
-            other => bail!("auth.mode must be ingress|dev, got {other:?}"),
+            other => bail!("auth.mode must be cred|ingress, got {other:?}"),
         };
+        if mode == AuthMode::Cred && self.credentials.is_none() {
+            // fail-closed：说好了走凭据却没给材料，不能默默降级成
+            // 「ingress 但又没有入口」那种 401 满地跑的半吊子状态。
+            bail!("auth.mode = cred requires a [credentials] section (file = <cred.toml>)");
+        }
         if self.auth.operator_header.trim().is_empty() {
             bail!("auth.operator_header must not be empty");
         }
@@ -297,6 +347,23 @@ impl RawConfig {
             auth: AuthConfig {
                 mode,
                 operator_header: self.auth.operator_header,
+            },
+            credentials: match self.credentials {
+                Some(raw) => {
+                    if raw.file.trim().is_empty() {
+                        bail!("credentials.file must point at the cred.toml from the join command");
+                    }
+                    if raw.required_roles.is_empty() {
+                        bail!("credentials.required_roles must list at least one role");
+                    }
+                    Some(CredentialsConfig {
+                        file: expand(env, &raw.file)?.into(),
+                        listen_addr: expand(env, &raw.listen_addr)?,
+                        store_path: expand(env, &raw.store_path)?.into(),
+                        required_roles: raw.required_roles,
+                    })
+                }
+                None => None,
             },
             evidence: EvidenceConfig {
                 base_url: expand(env, &self.evidence.base_url)?,
@@ -349,22 +416,61 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_ingress_and_read_only() {
+    fn defaults_are_cred_read_only() {
         let config = parse(
             r#"
+            [credentials]
+            file = "/etc/wist-console/cred/cred.toml"
+
             [evidence]
             base_url = "http://127.0.0.1:8443"
             tenant = "t-001"
             "#,
         )
         .expect("minimal config should parse");
-        assert_eq!(config.auth.mode, AuthMode::Ingress);
+        // 默认走凭据，不是「不校验」：没有 token 就进不来。
+        assert_eq!(config.auth.mode, AuthMode::Cred);
+        let credentials = config.credentials.as_ref().expect("credentials");
+        assert_eq!(credentials.required_roles, vec!["read"]);
         assert_eq!(config.auth.operator_header, "x-console-operator");
         assert_eq!(config.evidence.scopes, vec!["evidence:read"]);
         assert_eq!(config.evidence.max_sensitivity, "paths");
         assert!(config.atlas.is_none());
         assert!(config.integration.sink_url.is_none());
         assert!(config.integration.sink_health_url.is_none());
+    }
+
+    #[test]
+    fn cred_mode_without_credentials_is_rejected() {
+        let error = parse(
+            r#"
+            [evidence]
+            base_url = "http://x"
+            tenant = "t-001"
+            "#,
+        )
+        .expect_err("cred without materials must fail");
+        assert!(
+            error.to_string().contains("requires a [credentials] section"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ingress_mode_does_not_need_credentials() {
+        let config = parse(
+            r#"
+            [auth]
+            mode = "ingress"
+
+            [evidence]
+            base_url = "http://x"
+            tenant = "t-001"
+            "#,
+        )
+        .expect("ingress is still supported behind a proxy");
+        assert_eq!(config.auth.mode, AuthMode::Ingress);
+        assert!(config.credentials.is_none());
     }
 
     #[test]
@@ -379,13 +485,15 @@ mod tests {
             "#,
         )
         .expect_err("unknown auth mode must fail");
-        assert!(error.to_string().contains("auth.mode must be ingress|dev"));
+        assert!(error.to_string().contains("auth.mode must be cred|ingress"));
     }
 
     #[test]
     fn unknown_sensitivity_is_rejected() {
         let error = parse(
             r#"
+            [auth]
+            mode = "ingress"
             [evidence]
             base_url = "http://x"
             tenant = "t-001"
@@ -400,6 +508,8 @@ mod tests {
     fn unresolved_placeholder_is_rejected() {
         let error = parse(
             r#"
+            [auth]
+            mode = "ingress"
             [evidence]
             base_url = "${SEC_EVIDENCE_URL}"
             tenant = "t-001"

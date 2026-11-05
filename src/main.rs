@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use wist_console::api::{self, AppState};
-use wist_console::config::Config;
+use wist_console::config::{AuthMode, Config};
+use wist_console::credentials;
 use wist_console::upstream::EvidenceClient;
 
 #[tokio::main]
@@ -15,6 +16,19 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = std::env::args().nth(1);
     let config = Config::load(config_path.as_deref().map(Path::new))?;
+
+    // 凭据运行时：启动期就把 mTLS 建好（证书缺失 / 链不对 → 直接拒启，
+    // 不出现「业务面只认凭据、凭据 listener 起不来」的半启用状态）。
+    let credentials = match (&config.credentials, config.auth.mode) {
+        (Some(credentials_config), AuthMode::Cred) => Some(Arc::new(
+            credentials::build(credentials_config)
+                .map_err(|err| anyhow::anyhow!("credentials: {err}"))?,
+        )),
+        _ => None,
+    };
+    if let Some(runtime) = credentials.as_ref() {
+        credentials::spawn_listener(Arc::clone(runtime));
+    }
 
     let evidence = EvidenceClient::new(&config.evidence)?;
     let http = reqwest::Client::builder()
@@ -37,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config.clone()),
         evidence: Arc::new(evidence),
         http,
+        credentials,
     };
     let app = api::router(state);
 

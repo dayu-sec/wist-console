@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 0.1.11 · 2026-11-05
+
+- **接入 `wist-cred-peer` 做认证与授权，删掉 `dev`（不校验）模式**。
+  `auth.mode = "cred"`（默认）：浏览器带 `Authorization: Bearer wcr_…`，BFF 用摘要表验；
+  `cred` 通过 mTLS 把 `{digest, subject, roles, expires_at, signature}` 推到
+  `credentials.listen_addr`（默认 3103），**只落 sha256**，重启不丢、撤销不复活。
+- 401 / 403 分开：没带 token → `console_credential_missing`；不认识 / 过期 / 撤销 →
+  `console_credential_invalid`（对外不区分原因）；角色不够 → `console_role_required`。
+- `auth.mode = "ingress"` 保留：入口已经做了认证、并能保证头不被伪造时可用。
+- 配置 fail-closed：`mode = "cred"` 但缺 `[credentials]`、`cred.toml` 读不到、
+  `required_roles` 不在 `[verify].roles` 里 —— 都在**启动期**报错，不带病运行。
+
 ## 0.1.10 · 2026-11-05
 
 - 新增 `[metrics] base_url`（VictoriaMetrics）：`/api/health` 多一条「运行指标存储」探活，

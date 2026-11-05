@@ -46,8 +46,11 @@ GET  /api/integration
 
 ## 入口身份
 
-`auth.mode = "ingress"`（默认）要求请求带 `x-console-operator`（由 VPN / 堡垒机 / 反代注入）；
-`auth.mode = "dev"` 只用于本机联调。**不建议**把 `dev` 暴露到任何共享网络。
+`auth.mode = "cred"`（默认）：请求带 `Authorization: Bearer wcr_…`，摘要由 `wist-cred` 通过
+mTLS 推到 `credentials.listen_addr`（默认 `3103`），BFF 用 `wist-cred-peer` 验；没有 token → 401，
+角色不够 → 403。
+`auth.mode = "ingress"`：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-console-operator` 里。
+**没有「不校验」这一档** —— 一个计算区界面不该默认谁都能进。
 
 ## 运行
 

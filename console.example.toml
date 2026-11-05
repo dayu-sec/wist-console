@@ -6,9 +6,19 @@
 listen_addr = "127.0.0.1:19200"
 
 [auth]
-# ingress：入口（VPN / 堡垒机 / 反代）必须注入操作者头；dev：本机联调不校验。
-mode = "dev"
+# cred（默认）：`Authorization: Bearer wcr_…`，摘要由 `wist-cred` 通过 mTLS 推过来
+#                    （见下面的 `[credentials]`）。
+# ingress：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-console-operator` 里。
+# **没有「不校验」这一档。**
+mode = "cred"
 operator_header = "x-console-operator"
+
+[credentials]
+# 接入命令落的 `cred.toml`（identity + verify 两段），本服务只认这个文件。
+file = "identity/console/cred/cred.toml"
+listen_addr = "127.0.0.1:19310"
+store_path = "state/credentials.json"
+required_roles = ["read"]
 
 # 到证据服务的身份：BFF 持有的**唯一**凭据来源，浏览器不接受这三项传参。
 [evidence]

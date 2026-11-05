@@ -29,6 +29,7 @@ fn config(base_url: String, mode: AuthMode) -> Config {
             mode,
             operator_header: "x-console-operator".to_string(),
         },
+        credentials: None,
         evidence: EvidenceConfig {
             base_url,
             tenant: "t-001".to_string(),
@@ -52,6 +53,7 @@ fn state(config: Config) -> AppState {
         config: Arc::new(config),
         evidence: Arc::new(evidence),
         http: reqwest::Client::new(),
+        credentials: None,
     }
 }
 
@@ -171,15 +173,17 @@ async fn missing_operator_header_is_401() {
 }
 
 #[tokio::test]
-async fn dev_mode_does_not_require_an_operator() {
+async fn cred_mode_rejects_a_missing_bearer_token() {
     let base = spawn_stub().await;
-    let app = api::router(state(config(base, AuthMode::Dev)));
+    let app = api::router(state(config(base, AuthMode::Cred)));
     let request = Request::builder()
         .uri("/api/evidence")
         .body(Body::empty())
         .unwrap();
     let (status, body) = call(&app, request).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // 没有「不校验」这一档：cred 模式下没 token 就是 401，且原因与「token 不认识」分开。
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["code"], "console_credential_missing");
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 [package]
 name = "wist-console"
-version = "0.1.10" #@gxl:set(version)
+version = "0.1.11" #@gxl:set(version)
 edition = "2024"
 license = "Apache-2.0"
 authors = ["wist Dev Team"]
@@ -18,6 +18,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
 toml = "1.1"
+# 访问凭据：本服务是 `wist-cred` 的验证方（X）。
+# 与 wist-center 同一套接入：摘要表只存 sha256，收数走 mTLS。
+wist-cred-peer = "0.2"
+# 凭据 listener 的 mTLS 握手（与 wist-cred-peer / wist-gwlinkd 同一份实现）。
+wist-pki = "0.1.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+hex = "0.4"
 # 配置里的 `${SEC_...}`：与其它服务同口径（env 优先，其次 `.galaxy/sec_value.yml`）。
 orion-sec = "0.7"
 orion-variate = "0.14"
