@@ -82,7 +82,7 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .map(|metrics| format!("{}/health", metrics.base_url.trim_end_matches('/')));
 
     // 并发探活：一个上游挂掉不该把另外两个的延迟一起拖长。
-    let (read_iface, write_iface, atlas_iface, metrics_iface) = tokio::join!(
+    let (read_iface, write_iface, atlas_iface, metrics_iface, credentials_iface) = tokio::join!(
         probe_evidence_read(&state),
         probe_opt(
             &state.http,
@@ -108,13 +108,20 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
             metrics_url,
             "未配置 metrics.base_url",
         ),
+        async { credentials_interface(&state) },
     );
 
     // `sources` 由同一次探活派生，不再重复发请求。
     let evidence = source_from(&read_iface);
     let atlas = source_from(&atlas_iface);
     let metrics = source_from(&metrics_iface);
-    let interfaces = vec![read_iface, write_iface, atlas_iface, metrics_iface];
+    let interfaces = vec![
+        read_iface,
+        write_iface,
+        atlas_iface,
+        metrics_iface,
+        credentials_iface,
+    ];
 
     Json(Health {
         status: "ok",
@@ -601,6 +608,71 @@ async fn probe(
             Some(latency_ms),
         ),
     }
+}
+
+/// 访问凭据的状态：**不发请求**，看的就是本进程手里的两个事实 ——
+/// 收数 listener 还在不在、摘要表里登记了几条。
+///
+/// 这条必须存在：peer 在 cred 侧「注册了但没有 endpoint」时，现象只是「令牌全 401」，
+/// 页面上一眼看不出来；而 `registered = 0` 直接把「还没人推过来」摆到脸上。
+fn credentials_interface(state: &AppState) -> serde_json::Value {
+    let Some(credentials) = state.credentials.as_ref() else {
+        return entry(
+            "credentials",
+            "访问凭据（wist-cred）",
+            "本服务是 `wist-cred` 的验证方：cred 通过 mTLS 推摘要，浏览器用 `Bearer wcr_…` 访问。\n\
+             当前 `auth.mode = ingress`，凭据不参与认证。",
+            None,
+            "not_configured",
+            Some("auth.mode = ingress：认证交给入口".to_string()),
+            None,
+        );
+    };
+
+    let registered = credentials.registered();
+    let rejected = credentials.rejected_on_load();
+    let alive = credentials.listener_alive();
+    let listen = credentials.listen();
+
+    let (status, detail) = if !alive {
+        (
+            "unavailable",
+            format!(
+                "收数监听 {listen} 不在运行：新凭据推不进来（已登记的 {registered} 条仍然有效）"
+            ),
+        )
+    } else if registered == 0 {
+        (
+            "unavailable",
+            format!(
+                "收数监听 {listen} 在线，但一条凭据都没登记：检查 cred 侧这个 peer 的 endpoint \
+                 （接入时漏了 --advertise？）以及 cred 到 {listen} 的可达性"
+            ),
+        )
+    } else {
+        (
+            "ok",
+            format!("已登记 {registered} 条凭据；收数监听 {listen} 在线"),
+        )
+    };
+
+    let mut detail = detail;
+    if rejected > 0 {
+        detail.push_str(&format!(
+            "。⚠ 启动时有 {rejected} 条记录因签名不合格被丢弃（磁盘被改过 / 签名密钥换过）"
+        ));
+    }
+
+    entry(
+        "credentials",
+        "访问凭据（wist-cred）",
+        "本服务是 `wist-cred` 的验证方：cred 通过 mTLS 推摘要（只存 sha256），\
+         浏览器用 `Authorization: Bearer wcr_…` 访问。这一条挂掉 = 没人能登录。",
+        None,
+        status,
+        Some(detail),
+        None,
+    )
 }
 
 /// 读端点用**真读**探活（`limit=1`）：鉴权、租户/敏感度闸、PG 索引都会走到，

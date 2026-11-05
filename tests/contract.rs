@@ -226,7 +226,7 @@ async fn health_reports_unconfigured_domains() {
     // 接口可用性：读端点探的是一次**真实读**（鉴权 + PG 索引都会走到），
     // 写端点与 atlas 没配地址时显式 `not_configured`。
     let interfaces = body["interfaces"].as_array().expect("interfaces array");
-    assert_eq!(interfaces.len(), 4, "{body}");
+    assert_eq!(interfaces.len(), 5, "{body}");
     assert_eq!(interfaces[0]["id"], "evidence_read");
     assert_eq!(interfaces[0]["status"], "ok", "{body}");
     assert!(interfaces[0]["latency_ms"].is_u64());
@@ -243,6 +243,9 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(interfaces[2]["status"], "not_configured");
     assert_eq!(interfaces[3]["id"], "metrics");
     assert_eq!(interfaces[3]["status"], "not_configured");
+    // 凭据：ingress 模式不参与认证，但条目要在，页面才知道这一域存在。
+    assert_eq!(interfaces[4]["id"], "credentials");
+    assert_eq!(interfaces[4]["status"], "not_configured");
 }
 
 #[tokio::test]
@@ -266,6 +269,12 @@ async fn interfaces_are_probed_when_configured() {
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     for entry in body["interfaces"].as_array().expect("interfaces array") {
+        // `credentials` 看的是本进程手里的状态，不发请求，所以没有延迟；
+        // 这个用例只验「配了地址的都能探通」。
+        if entry["id"] == "credentials" {
+            assert_eq!(entry["status"], "not_configured", "{body}");
+            continue;
+        }
         assert_eq!(entry["status"], "ok", "{body}");
         assert!(entry["latency_ms"].is_u64(), "{body}");
     }

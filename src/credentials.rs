@@ -68,6 +68,9 @@ pub struct CredentialRuntime {
     tls: rustls::ServerConfig,
     /// 进入 console 需要的角色（console 自己的决定，不来自 cred.toml）。
     required_roles: Vec<String>,
+    /// 收数 listener 是否还在跑。`spawn_listener` 置位，退出时清掉；
+    /// 它挂了不会影响已登记的旧凭据，但「新凭据推不进来」必须能在页面上看到。
+    listener_alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for CredentialRuntime {
@@ -121,6 +124,21 @@ impl CredentialRuntime {
 
     pub fn listen(&self) -> SocketAddr {
         self.listen
+    }
+
+    /// 已登记的凭据条数（= 目前能通过认证的 token 数）。
+    pub fn registered(&self) -> usize {
+        self.peer.registered()
+    }
+
+    /// 启动加载时被丢弃的条数（磁盘被改过 / 签名密钥换过）。
+    pub fn rejected_on_load(&self) -> usize {
+        self.peer.rejected_on_load()
+    }
+
+    pub fn listener_alive(&self) -> bool {
+        self.listener_alive
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -232,6 +250,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         listen,
         tls,
         required_roles: config.required_roles.clone(),
+        listener_alive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
 
@@ -240,12 +259,15 @@ pub fn spawn_listener(runtime: Arc<CredentialRuntime>) {
     let listen = runtime.listen;
     let app = runtime.peer.router();
     let tls = runtime.tls.clone();
+    let alive = Arc::clone(&runtime.listener_alive);
+    alive.store(true, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         if let Err(err) = wist_cred_peer::serve_router(app, listen, tls).await {
             // 这个 listener 挂了只影响「新凭据能不能推进来」，已登记的摘要仍然有效；
-            // 所以记错误而不是把整个进程带下去。
+            // 所以记错误而不是把整个进程带下去 —— 但状态要落下来，让 /api/health 能看见。
             log::error!("credentials listener on {listen} stopped: {err}");
         }
+        alive.store(false, std::sync::atomic::Ordering::Relaxed);
     });
     log::info!("credentials listener on {listen} (mTLS, push-only)");
 }
