@@ -295,7 +295,11 @@ mod tests {
 
         std::fs::write(&path, "\n").expect("write empty");
         assert!(load_issuer_keys(&path, true).is_err());
-        assert!(load_issuer_keys(&path, false).expect("tolerated").is_empty());
+        assert!(
+            load_issuer_keys(&path, false)
+                .expect("tolerated")
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

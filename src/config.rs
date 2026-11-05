@@ -451,7 +451,9 @@ mod tests {
         )
         .expect_err("cred without materials must fail");
         assert!(
-            error.to_string().contains("requires a [credentials] section"),
+            error
+                .to_string()
+                .contains("requires a [credentials] section"),
             "{error}"
         );
     }

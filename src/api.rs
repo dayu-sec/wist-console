@@ -321,10 +321,7 @@ async fn proxy_atlas(
     };
     // 写端点与路径穿越都不放行：这里只代理 atlas 的公开读接口。
     let rest = rest.trim_start_matches('/');
-    if rest.is_empty()
-        || rest.contains("..")
-        || rest.contains("//")
-        || rest.starts_with("internal")
+    if rest.is_empty() || rest.contains("..") || rest.contains("//") || rest.starts_with("internal")
     {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -430,7 +427,9 @@ fn require_operator(
                     Err(OperatorError::StoreUnavailable)
                 }
                 // 不对外区分「不认识 / 过期 / 撤销 / audience 不符」。
-                Err(crate::credentials::VerifyError::Invalid) => Err(OperatorError::InvalidCredential),
+                Err(crate::credentials::VerifyError::Invalid) => {
+                    Err(OperatorError::InvalidCredential)
+                }
             }
         }
     }
