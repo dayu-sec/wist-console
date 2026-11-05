@@ -135,6 +135,13 @@ pub struct CredentialRuntime {
     /// 收数 listener 是否还在跑。`spawn_listener` 置位，退出时清掉；
     /// 它挂了不会影响已登记的旧凭据，但「新凭据推不进来」必须能在页面上看到。
     listener_alive: Arc<std::sync::atomic::AtomicBool>,
+    /// 启动时材料就在（所以 listener 用的是启动时加载的那套证书）。
+    /// 它的用处只有一个：识别「运行中把材料删了」——那时 `is_initialized()` 已经是 false，
+    /// 但 listener 还拿旧证书在跑，两个事实必须能同时被看到。
+    serving_loaded_tls: bool,
+    /// 本次启动**没有**开强制验签，因为启动时公钥还不存在（自注册之前）。
+    /// 注册完成后必须重启才生效 —— 这是个“正运行时处于降级状态”的事实，得能看见。
+    signature_deferred: bool,
 }
 
 impl std::fmt::Debug for CredentialRuntime {
@@ -198,6 +205,16 @@ impl CredentialRuntime {
     /// 材料是否齐备。由 `cred-peer` 推导（三件文件），不额外存状态。
     pub fn is_initialized(&self) -> bool {
         wist_cred_peer::init_state(self.peer.config()) == wist_cred_peer::InitState::Initialized
+    }
+
+    /// 本次启动是否因为“公钥还没随注册下发”而暂时没验签。
+    pub fn signature_deferred(&self) -> bool {
+        self.signature_deferred
+    }
+
+    /// 启动时材料就在（listener 用的是启动时加载的证书）。
+    pub fn serving_loaded_tls(&self) -> bool {
+        self.serving_loaded_tls
     }
 
     /// 已登记的凭据条数（= 目前能通过认证的 token 数）。
@@ -295,7 +312,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         }
     }
 
-    let require_signature = match &cred.verify.require_signature {
+    let mut require_signature = match &cred.verify.require_signature {
         Some(value) => value.resolve("[verify].require_signature")?,
         None => false,
     };
@@ -306,12 +323,24 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         .map_err(|err| format!("credentials.listen_addr {:?}: {err}", config.listen_addr))?;
 
     let client_ca_pem = std::fs::read_to_string(&client_ca);
+    // 三件都在 = 已初始化（与 `wist-cred-peer::init_state` 同一个判据）。
+    let initialized = cert.is_file() && key.is_file() && client_ca_pem.is_ok();
     // 三件都在 → 启动即就绪；缺就等 `/__init`（但那就必须配了 `[init]`）。
     let tls = match (&client_ca_pem, &cred.init) {
         (Ok(pem), _) if cert.is_file() && key.is_file() => Some(
             // 严格 mTLS：cred 必须出示 CA-I 签的客户端证书，否则连不上来。
             wist_pki::tls::server_config_mtls(&cert, &key, pem, false)?,
         ),
+        // 证书/私钥都在、只有 client CA 读不了（权限/损坏）：这是**配置故障**，
+        // 不能当成“还没初始化”混过去 —— cred-peer 会认为已初始化，于是既不会开
+        // `/__init`（409），listener 又起不来，现场表现成“一切正常但推不进来”。
+        (Err(err), _) if cert.is_file() && key.is_file() => {
+            return Err(format!(
+                "{}: server cert/key are present but the client CA is unreadable ({err}); \
+                 fix the file (or remove all three to re-register)",
+                client_ca.display()
+            ));
+        }
         (_, Some(_)) => None,
         (Err(err), None) => {
             return Err(format!(
@@ -326,6 +355,32 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
             ));
         }
     };
+
+    // 验签公钥是**自注册时随 bundle 下发**的。所以“未初始化 + 强制验签 + 公钥还没到”
+    // 不能当配置错误：那会形成启动死锁 —— 进程起不来，就永远打不开 `/__init`。
+    // 这一档只允许在**未初始化**时出现，而且必须**显式告警 + 在健康页面上写出来**；
+    // 一旦材料齐备（重启后）就恢复强制验签，缺公钥仍然拒启动（fail-closed）。
+    let key_file = cred
+        .verify
+        .issuer_public_key_file
+        .as_ref()
+        .map(|path| base.join(path));
+    let key_ready = key_file.as_ref().is_none_or(|path| path.is_file());
+    let mut signature_deferred = false;
+    if require_signature && !initialized && !key_ready {
+        log::warn!(
+            "credentials: [verify].require_signature = true, but no issuer public key at {} — \
+             starting WITHOUT signature verification: the key is delivered with the bundle during \
+             self-registration (/__init), so it cannot exist yet. Restart this service after \
+             registering to enforce it",
+            key_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unset>".to_string())
+        );
+        require_signature = false;
+        signature_deferred = true;
+    }
 
     let endpoint = match &cred.publish {
         Some(publish) => {
@@ -413,7 +468,9 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
     Ok(CredentialRuntime {
         peer,
         listen,
+        serving_loaded_tls: tls.is_some(),
         tls,
+        signature_deferred,
         required_roles: config.required_roles.clone(),
         listener_alive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
@@ -730,14 +787,116 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
     }
 
     #[test]
-    fn require_signature_switched_on_by_a_string_really_applies() {
-        // 开了验签但没有公钥：启动期就报 —— 证明 `"true"` 真的被当成开关，
-        // 而不是“看起来配了实际没开”。
-        let dir = temp_dir("sigwire");
-        let error = build_from(
+    fn signature_verification_is_deferred_until_self_registration() {
+        // 公钥是**自注册时随 bundle 下发**的，所以“还没初始化 + 强制验签 + 公钥不在”
+        // 必须是可启动的：否则进程起不来 → 永远打不开 `/__init` → 死锁。
+        // 用字符串形式（`"true"`）顺带证明“变量开关”真的生效：若当成 false，就不会延迟。
+        let dir = temp_dir("sigdefer");
+        let runtime = build_from(
             &dir,
             &format!(
                 "{VERIFY}require_signature = \"true\"\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://console.internal:18802/api/v1/internal/credentials\"\n"
+            ),
+        )
+        .expect("uninitialized service must still start (key arrives with the bundle)");
+        assert!(!runtime.is_initialized());
+        assert!(
+            runtime.signature_deferred(),
+            "验签应当处于“延后”状态（否则就是静默关掉了）"
+        );
+    }
+
+    #[test]
+    fn an_initialized_service_without_the_issuer_key_refuses_to_start() {
+        // 已经接入（材料齐备）却缺公钥 = 配置错，不能默默不验签。
+        let dir = temp_dir("signok");
+        write_materials(&dir);
+        let error = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}require_signature = true\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[identity]\ncert = \"server.crt\"\nkey = \"server.key\"\nclient_ca = \"client-ca.pem\"\n"
+            ),
+        )
+        .expect_err("must refuse");
+        assert!(error.contains("issuer-signing.pub"), "{error}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_client_ca_is_a_startup_error_not_a_silent_wait() {
+        // 证书/私钥都在、只有 client CA 读不了：若当成“未初始化”，
+        // cred-peer 仍认为已初始化 → /__init 回 409、listener 又起不来，
+        // 现场表现成“一切正常但推不进来”。所以这里必须启动期就报。
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("unreadable-ca");
+        write_materials(&dir);
+        let ca = dir.join("client-ca.pem");
+        std::fs::set_permissions(&ca, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let body = format!(
+            "{VERIFY}\n[identity]\ncert = \"server.crt\"\nkey = \"server.key\"\nclient_ca = \"client-ca.pem\"\n"
+        );
+        let error = build_from(&dir, &body).expect_err("must refuse");
+        std::fs::set_permissions(&ca, std::fs::Permissions::from_mode(0o644)).expect("restore");
+        assert!(error.contains("unreadable"), "{error}");
+    }
+
+    #[test]
+    fn materials_deleted_at_runtime_are_reported_not_hidden() {
+        // 运行中把三件材料删了：`is_initialized()` 立刻变 false，但 listener 还拿着
+        // 启动时加载的证书在跑。两个事实都要能看见（见 `/api/health` 的文案），
+        // 否则“重新注册成功但新证书没生效”会是个静默不一致。
+        let dir = temp_dir("vanished");
+        write_materials(&dir);
+        let runtime = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}\n[identity]\ncert = \"server.crt\"\nkey = \"server.key\"\nclient_ca = \"client-ca.pem\"\n"
+            ),
+        )
+        .expect("build");
+        assert!(runtime.is_initialized());
+        assert!(runtime.serving_loaded_tls());
+
+        for name in ["server.crt", "server.key", "client-ca.pem"] {
+            std::fs::remove_file(dir.join(name)).expect("remove");
+        }
+        assert!(!runtime.is_initialized(), "材料没了就不再算已初始化");
+        assert!(
+            runtime.serving_loaded_tls(),
+            "但 listener 仍在用启动时那套证书 —— 这个事实不能被抹掉"
+        );
+    }
+
+    #[test]
+    fn an_initialized_service_with_the_issuer_key_does_not_defer() {
+        let dir = temp_dir("signready");
+        write_materials(&dir);
+        std::fs::write(
+            dir.join("issuer-signing.pub"),
+            format!("{}\n", "aa".repeat(32)),
+        )
+        .expect("key");
+        let runtime = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}require_signature = true\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[identity]\ncert = \"server.crt\"\nkey = \"server.key\"\nclient_ca = \"client-ca.pem\"\n"
+            ),
+        )
+        .expect("build");
+        assert!(runtime.is_initialized());
+        assert!(!runtime.signature_deferred(), "就绪后不应该再降级");
+    }
+
+    #[test]
+    fn require_signature_switched_on_by_a_string_really_applies() {
+        // 已初始化 + 强制验签 + 缺公钥 → 启动期报（fail-closed），
+        // 顺带证明 `"true"` 真的被当成开关解析了，而不是“看起来配了实际没开”。
+        let dir = temp_dir("sigwire");
+        write_materials(&dir);
+        let error = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}require_signature = \"true\"\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[identity]\ncert = \"server.crt\"\nkey = \"server.key\"\nclient_ca = \"client-ca.pem\"\n"
             ),
         )
         .expect_err("must refuse");

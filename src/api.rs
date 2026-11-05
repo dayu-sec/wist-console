@@ -72,12 +72,25 @@ async fn require_initialized(
         .as_ref()
         .is_some_and(|credentials| !credentials.is_initialized());
     if uninitialized && request.uri().path().starts_with("/api/") {
+        // 这一条是现场**唯一**能看到的状态描述（`/api/health` 自己也在这道门后面），
+        // 所以要把“运行中删了材料”这件事直接写在这里，而不是只写进日志。
+        let deleted_at_runtime = state
+            .credentials
+            .as_ref()
+            .is_some_and(|credentials| credentials.serving_loaded_tls());
+        let message = if deleted_at_runtime {
+            "identity materials were removed while this service was running: the push listener \
+             still holds the certificate loaded at startup — re-register at /__init, then \
+             RESTART this service so the new certificate is actually served"
+        } else {
+            "this console has no cred materials yet: open /__init to register it"
+        };
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "error": {
                     "code": "peer_not_initialized",
-                    "message": "this console has no cred materials yet: open /__init to register it",
+                    "message": message,
                 }
             })),
         )
@@ -673,11 +686,22 @@ fn credentials_interface(state: &AppState) -> serde_json::Value {
     let listen = credentials.listen();
 
     let (status, detail) = if !credentials.is_initialized() {
-        (
-            "unavailable",
-            "尚未初始化：浏览器打开 /__init，填 setup code + 接入券完成注册（业务面现在全部 503）"
-                .to_string(),
-        )
+        if credentials.serving_loaded_tls() {
+            // 运行中删了材料：listener 还在用启动时加载的那套证书。
+            // 不说清楚的话，注册完会出现“看着成功了、新证书其实没被加载”的静默不一致。
+            (
+                "unavailable",
+                "身份材料在运行期被删除：收数监听仍在用启动时加载的旧证书。\
+                 重新注册（/__init）之后必须**重启**本服务，新证书才会生效"
+                    .to_string(),
+            )
+        } else {
+            (
+                "unavailable",
+                "尚未初始化：浏览器打开 /__init，填 setup code + 接入券完成注册（业务面现在全部 503）"
+                    .to_string(),
+            )
+        }
     } else if !alive {
         (
             "unavailable",
@@ -699,6 +723,15 @@ fn credentials_interface(state: &AppState) -> serde_json::Value {
             "ok",
             format!("已登记 {registered} 条凭据；收数监听 {listen} 在线"),
         )
+    };
+    // “正在降级运行”不能只写在日志里（运维不看容器日志就会以为一切正常）。
+    let detail = if credentials.signature_deferred() {
+        format!(
+            "{detail}；⚠ 授权记录验签**未启用**：启动时公钥还没下发（自注册之前无法存在），\
+             完成注册后重启本服务即开始强制验签"
+        )
+    } else {
+        detail
     };
 
     let mut detail = detail;

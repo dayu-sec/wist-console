@@ -557,3 +557,99 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 运行中把材料删掉 → 门后面的 503 要说清「重新注册后必须重启」。
+///
+/// 这条文案是现场**唯一**能看到的状态描述：`/api/health` 自己也在这道门后面。
+#[tokio::test]
+async fn deleting_materials_at_runtime_is_reported_in_the_503_body() {
+    fn write_materials(dir: &std::path::Path) {
+        use wist_pki::CertificateAuthority;
+        wist_pki::tls::install_crypto_provider();
+
+        let (authority, ca_pem, _key) = CertificateAuthority::generate("Stub CA").expect("ca");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "console.internal".to_string());
+        let csr = params
+            .serialize_request(&key)
+            .expect("csr")
+            .pem()
+            .expect("csr pem");
+        let issued = authority
+            .issue_server_certificate(&csr, &["console.internal".to_string()], 3600)
+            .expect("issue");
+        std::fs::write(dir.join("server.crt"), &issued.certificate_pem).expect("cert");
+        std::fs::write(dir.join("server.key"), key.serialize_pem()).expect("key");
+        std::fs::write(dir.join("client-ca.pem"), &ca_pem).expect("ca");
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "wist-console-gone-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0),
+        {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    write_materials(&dir);
+    let cred_file = dir.join("cred.toml");
+    std::fs::write(
+        &cred_file,
+        r#"
+[identity]
+cert = "server.crt"
+key = "server.key"
+client_ca = "client-ca.pem"
+
+[verify]
+audience = "wist-console"
+allowed_issuers = ["wist-cred"]
+roles = ["read"]
+"#,
+    )
+    .expect("cred.toml");
+
+    let runtime = Arc::new(
+        wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+            file: cred_file,
+            listen_addr: "127.0.0.1:0".to_string(),
+            store_path: dir.join("credentials.json"),
+            required_roles: vec!["read".to_string()],
+        })
+        .expect("credentials"),
+    );
+    assert!(runtime.is_initialized());
+
+    let base = spawn_stub().await;
+    let mut app_state = state(config(base, AuthMode::Cred));
+    app_state.credentials = Some(runtime);
+    let app = api::router(app_state);
+
+    for name in ["server.crt", "server.key", "client-ca.pem"] {
+        std::fs::remove_file(dir.join(name)).expect("remove");
+    }
+
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/evidence")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "peer_not_initialized");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("RESTART"), "{message}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
