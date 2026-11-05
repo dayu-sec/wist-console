@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.1.9 · 2026-11-05
+
+- `/api/integration` 改成**三字段契约**：示例记录是 `{cust_id, cmd_id, content}`，
+  连接器不再带 `username` / `password`，`env` 只剩 `EVIDENCE_SINK_URL`；
+  sink 分组名改成 `evidence-uplink`（与 `wist-console-stack` 的示例对齐）。
+- 「接口可用性」的写端点检查会读证据服务 `/healthz` 的 `probe` 块，直接显示
+  「写探针 12 秒前成功（3 ms）」，而不是只说「端口通」。
+
 ## 0.1.8 · 2026-11-04
 
 - 代理读正文的响应补 `cache-control: no-store` 与 `x-content-type-options: nosniff`：

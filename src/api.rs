@@ -132,10 +132,11 @@ async fn integration(State(state): State<AppState>, headers: HeaderMap) -> Respo
     let sink_base = sink_base.trim_end_matches('/').to_string();
     let write_url = format!("{sink_base}/internal/evidence");
 
-    // 注意：`format!` 里的 `{{` / `}}` 是转义的大括号，`${{...}}` 才是字面量 `${...}`。
+    // 连接器只负责 POST，**不做字段映射**；发出去的就是 OML 的输出。
+    // 三字段（cust_id / cmd_id / content）+ 证据服务 `auth = "none"`：不需要 token。
     let connector = format!(
         r#"[[connectors]]
-allow_override = ["endpoint", "username", "password", "headers", "fmt", "batch_size", "timeout_secs", "max_retries"]
+allow_override = ["endpoint", "headers", "fmt", "batch_size", "timeout_secs", "max_retries"]
 id = "evidence_sink"
 type = "http"
 
@@ -147,8 +148,6 @@ batch_size = 1
 timeout_secs = 5
 max_retries = 3
 compression = "none"
-username = "${{EVIDENCE_SINK_TOKEN}}"
-password = ""
 
 [connectors.params.headers]
 Content-Type = "application/json"
@@ -157,9 +156,9 @@ Content-Type = "application/json"
 
     let sink_group = format!(
         r#"[sink_group]
-name = "agent-ivsrep-evidence"
-oml = ["agent_uplink_ivsrep"]
-tags = ["biz:agent-ivsrep"]
+name = "evidence-uplink"
+oml = ["evidence_uplink"]
+tags = ["biz:evidence"]
 batch_size = 1
 batch_timeout_ms = 300
 
@@ -177,19 +176,20 @@ batch_size = 1
     Json(json!({
         "evidence": {
             "write_url": write_url,
-            "auth": "basic",
-            "username_is_token": true,
-            "tenant": state.config.evidence.tenant,
+            "auth": "none",
+            // `tenant` 就是客户 id：租户与客户已经合并成一个维度。
+            "customer": state.config.evidence.tenant,
             "allowed_kinds": state.config.integration.allowed_kinds,
-            "frame_marker": "IVSREP",
+            "record": {
+                "cust_id": state.config.evidence.tenant,
+                "cmd_id": "cmd-20261105-001",
+                "content": { "summary": { "overall": "warn" }, "findings": [] },
+            },
         },
         "warp_parse": {
             "connector": connector,
             "sink_group": sink_group,
-            "env": {
-                "EVIDENCE_SINK_URL": sink_base,
-                "EVIDENCE_SINK_TOKEN": "<站点 token：与证据服务 sec-value.yml 一致>",
-            },
+            "env": { "EVIDENCE_SINK_URL": sink_base },
         },
     }))
     .into_response()
@@ -396,7 +396,10 @@ async fn probe(
     let latency_ms = started.elapsed().as_millis() as u64;
     match result {
         Ok(response) if response.status().is_success() => {
-            entry(id, label, covers, Some(url), "ok", None, Some(latency_ms))
+            // 证据服务的 `/healthz` 会带 `probe` 块（每 5 分钟一条真实写入的结果），
+            // 有就翻成一句人话，没有就留空。
+            let detail = write_probe_detail(response).await;
+            entry(id, label, covers, Some(url), "ok", detail, Some(latency_ms))
         }
         Ok(response) => entry(
             id,
@@ -463,6 +466,35 @@ async fn probe_evidence_read(state: &AppState) -> serde_json::Value {
 }
 
 /// 探活结果统一形状：没配地址时不计延迟/时间（那不是一次检查）。
+/// `{"probe":{...}}` → 「写探针 12 秒前成功（3 ms）」。
+/// 不是证据服务的健康响应 / 没开探针时返回 `None`。
+async fn write_probe_detail(response: reqwest::Response) -> Option<String> {
+    let body: serde_json::Value = response.json().await.ok()?;
+    let probe = body.get("probe")?;
+    let last_ok = probe.get("last_ok").and_then(serde_json::Value::as_bool);
+    let failures = probe
+        .get("consecutive_failures")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    match last_ok {
+        Some(false) => return Some(format!("写探针失败（连续 {failures} 次）")),
+        None => return Some("写探针还没跑过".to_string()),
+        Some(true) => {}
+    }
+    let checked_at_ms = probe
+        .get("last_at_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let latency_ms = probe
+        .get("last_latency_ms")
+        .and_then(serde_json::Value::as_u64);
+    let age_secs = (now_ms().saturating_sub(checked_at_ms)) / 1000;
+    match latency_ms {
+        Some(latency_ms) => Some(format!("写探针 {age_secs} 秒前成功（{latency_ms} ms）")),
+        None => Some(format!("写探针 {age_secs} 秒前成功")),
+    }
+}
+
 fn entry(
     id: &str,
     label: &str,

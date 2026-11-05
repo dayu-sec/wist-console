@@ -93,6 +93,22 @@ async fn spawn_stub() -> String {
         .route(
             "/internal/evidence/{artifact_id}/content",
             get(stub_content),
+        )
+        // 证据服务开了写探针时的 /healthz 形状。
+        .route(
+            "/probe-healthz",
+            get(|| async {
+                axum::Json(json!({
+                    "status": "ok",
+                    "probe": {
+                        "last_ok": true,
+                        "last_at_ms": 1_700_000_000_000u64,
+                        "last_latency_ms": 3,
+                        "consecutive_failures": 0,
+                        "purged_total": 7
+                    }
+                }))
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -253,13 +269,25 @@ async fn integration_page_shows_the_sink_contract() {
         body["evidence"]["write_url"],
         "http://10.0.0.5:18800/internal/evidence"
     );
-    assert_eq!(body["evidence"]["auth"], "basic");
-    assert_eq!(body["evidence"]["tenant"], "t-001");
+    assert_eq!(body["evidence"]["auth"], "none");
+    // 租户就是客户：这一格现在给的是客户 id。
+    assert_eq!(body["evidence"]["customer"], "t-001");
+    assert_eq!(body["evidence"]["record"]["cust_id"], "t-001");
+    assert_eq!(body["evidence"]["record"]["cmd_id"], "cmd-20261105-001");
+
     let connector = body["warp_parse"]["connector"].as_str().unwrap();
     assert!(connector.contains("evidence_sink"));
     assert!(connector.contains("http://10.0.0.5:18800/internal/evidence"));
-    // token 只能是占位符，不能把真值回传给浏览器。
-    assert!(connector.contains("${EVIDENCE_SINK_TOKEN}"));
+    // 认证放宽后连接器不应再带用户名/口令，也不该出现 token 占位符。
+    assert!(!connector.contains("username"), "{connector}");
+    assert!(!connector.contains("EVIDENCE_SINK_TOKEN"), "{connector}");
+
+    let sink_group = body["warp_parse"]["sink_group"].as_str().unwrap();
+    assert!(sink_group.contains("evidence_uplink"), "{sink_group}");
+    assert_eq!(
+        body["warp_parse"]["env"]["EVIDENCE_SINK_URL"],
+        "http://10.0.0.5:18800"
+    );
 }
 
 #[tokio::test]
@@ -332,4 +360,30 @@ async fn proxied_content_is_not_cacheable() {
             .and_then(|value| value.to_str().ok()),
         Some("nosniff")
     );
+}
+
+#[tokio::test]
+async fn write_interface_reports_the_probe() {
+    // 证据服务的 /healthz 带 probe 块时，接口可用性那一行要能看出「真的写进去了」。
+    let base = spawn_stub().await;
+    let mut cfg = config(base.clone(), AuthMode::Ingress);
+    cfg.integration.sink_health_url = Some(format!("{base}/probe-healthz"));
+    let app = api::router(state(cfg));
+    let request = Request::builder()
+        .uri("/api/health")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let write = body["interfaces"]
+        .as_array()
+        .expect("interfaces")
+        .iter()
+        .find(|entry| entry["id"] == "evidence_write")
+        .expect("evidence_write entry");
+    let detail = write["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("写探针"), "{detail}");
+    assert!(detail.contains("成功"), "{detail}");
 }
