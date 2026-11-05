@@ -555,6 +555,20 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "uninitialized");
 
+    // 登录端点也在这道门后面：没材料时连令牌都没得验。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"token":"wcr_x"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "peer_not_initialized");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
