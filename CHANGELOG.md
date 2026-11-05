@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.3.1 · 2026-11-06
+
+- **`/api/integration` 不再下发连接器定义**：`warp_parse` 只保留 `env`（写端点地址），
+  去掉 `connector` / `sink_group` —— 数据面接入统一复用现成的 `http_sink`，
+  不再引导为证据 / atlas 各建一个 `[[connectors]]`。写端点、字段约定与允许的 kind 不变。
+
 ## 0.3.0 · 2026-11-05
 
 - **新增 `POST /api/login`**：把访问令牌换成「你是谁 + 给了什么角色」
