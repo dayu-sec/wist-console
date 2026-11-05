@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 0.2.0 · 2026-11-05
+
+- **自注册（P1）**：`cred.toml` 可以不带 `[identity]`，只给 `[init]` + `[publish]` ——
+  首次启动只开 `/__init`，由本服务自己向 cred 登记并把三件材料写进 cred.toml 同目录；
+  材料齐了收数监听**自己起来**（`serve_when_ready`），不需要重启进程。
+- **未初始化时业务面一律 `503 peer_not_initialized`**（`/healthz` 仍通，否则容器会被
+  健康检查拖进无限重启）。以前这种状态只会表现为“页面能开、接口永远 401”。
+- `[init].setup_code` 支持 `${SEC_…}`：`cred.toml` 不走 BFF 的 `RawConfig`，但秘密仍
+  从同一个密钥文件展开；没展开成功就启动期报错，不退化成空口令。
+- `[init].ca_file` / `insecure_tls` 原样交给 `wist-cred-peer`（入口自签的信任锚，或确知跳过）；
+  变量渲染出来的空 `ca_file` 按“没配”处理。
+- 启动错误带上 `cred.toml` 路径；`publish_endpoint` 没主机名、`[identity]`/`[init]` 都没有
+  这类配置错，都在启动期就拒。
+- 依赖 `wist-cred-peer` **0.4**（P1 的 `ca_file` / `serve_when_ready` 在 0.3 里没有）。
+
 ## 0.1.13 · 2026-11-05
 
 - **凭据状态进了「接口可用性」**：`/api/health` 多一条 `credentials`，直接读本进程的两个事实 ——
