@@ -214,6 +214,18 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
             peer.rejected_on_load()
         );
     }
+    if peer.registered() == 0 {
+        // 一个都没登记：不是“正常但为空”，而是“还没人推过来”。
+        // 最常见的两个原因：peer 没配 endpoint（接入时漏了 `--advertise`），
+        // 或 cred 到不了这个 listener（端口只绑了回环）。
+        log::warn!(
+            "credentials: 0 credentials registered for audience {:?}; \
+             no one has pushed yet — check the peer's endpoint (`--advertise`) and \
+             that wist-cred can reach {} with a CA-S signed server certificate",
+            peer.config().audience,
+            listen
+        );
+    }
 
     Ok(CredentialRuntime {
         peer,
