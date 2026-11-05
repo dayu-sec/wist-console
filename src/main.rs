@@ -24,6 +24,14 @@ async fn main() -> anyhow::Result<()> {
             credentials::build(credentials_config)
                 .map_err(|err| anyhow::anyhow!("credentials: {err}"))?,
         )),
+        // 配了材料却选了 ingress：不装 listener，但要说一声 —— 否则运维会以为
+        // `wist-cred` 推得进来，实际上一辈子都是空的。
+        (Some(_), AuthMode::Ingress) => {
+            log::warn!(
+                "[credentials] is configured but auth.mode = ingress: the push listener is NOT started"
+            );
+            None
+        }
         _ => None,
     };
     if let Some(runtime) = credentials.as_ref() {

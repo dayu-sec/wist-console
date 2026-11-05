@@ -2723,6 +2723,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "wist-auth",
  "wist-cred-peer",
  "wist-pki",
 ]

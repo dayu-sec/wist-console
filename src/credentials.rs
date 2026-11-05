@@ -84,7 +84,20 @@ impl std::fmt::Debug for CredentialRuntime {
 impl CredentialRuntime {
     /// 校验一次 bearer token：`Ok` 带主体与角色，`Err` 带对外错误码。
     pub fn verify(&self, token: &str) -> Result<Caller, VerifyError> {
-        let credential = self.peer.verify(token).map_err(|_| VerifyError::Invalid)?;
+        let credential = match self.peer.verify(token) {
+            Ok(credential) => credential,
+            Err(err) => {
+                // 对外不区分原因（不做 token 枚举接口），但**日志里要能看出是哪一种**：
+                // 大半夜查「令牌突然全失效」时，`token_expired` 和 `invalid_token` 是两个故事。
+                // 摘要表读失败（磁盘 / 权限）不是「令牌不对」，不能让所有人去重新登录。
+                if matches!(err, wist_auth::credential::CredentialError::Store(_)) {
+                    log::error!("event=ConsoleCredentialStore code={} {err:?}", err.code());
+                    return Err(VerifyError::StoreUnavailable);
+                }
+                log::debug!("event=ConsoleCredentialRejected code={}", err.code());
+                return Err(VerifyError::Invalid);
+            }
+        };
         // 认证通过、授权不足是 403；对外不区分具体失败原因（不做 token 枚举接口）。
         if !credential
             .roles
@@ -123,6 +136,8 @@ pub enum VerifyError {
     Invalid,
     /// token 本身有效，但角色不够。
     RoleRequired,
+    /// 摘要表读不了（磁盘 / 权限）—— 这是服务端故障，不是「令牌不对」。
+    StoreUnavailable,
 }
 
 /// 按主配置装配。启用但材料不成立 → 启动期直接失败（fail-fast）。

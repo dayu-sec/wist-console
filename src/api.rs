@@ -349,7 +349,12 @@ fn require_operator(
             };
             match verifier.verify(token) {
                 Ok(caller) => Ok(Some(caller.subject)),
-                Err(crate::credentials::VerifyError::RoleRequired) => Err(OperatorError::RoleRequired),
+                Err(crate::credentials::VerifyError::RoleRequired) => {
+                    Err(OperatorError::RoleRequired)
+                }
+                Err(crate::credentials::VerifyError::StoreUnavailable) => {
+                    Err(OperatorError::StoreUnavailable)
+                }
                 // 不对外区分「不认识 / 过期 / 撤销 / audience 不符」。
                 Err(crate::credentials::VerifyError::Invalid) => Err(OperatorError::InvalidCredential),
             }
@@ -377,6 +382,8 @@ enum OperatorError {
     InvalidCredential,
     /// `cred` 模式：token 有效，但角色不够（403，不是 401）。
     RoleRequired,
+    /// 摘要表读不了：服务端故障，**不是**「你的令牌不对」（503）。
+    StoreUnavailable,
 }
 
 impl OperatorError {
@@ -401,6 +408,11 @@ impl OperatorError {
                 StatusCode::FORBIDDEN,
                 "console_role_required",
                 "access token is valid but does not grant console access",
+            ),
+            Self::StoreUnavailable => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "console_credential_store_unavailable",
+                "credential store is unavailable; this is a server-side problem, not your token",
             ),
         }
     }
