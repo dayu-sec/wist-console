@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 0.2.1 · 2026-11-05
+
+- 修 0.2.0 里两个「配了但没生效」——都是靠真配置启动才发现的那类：
+  1. **`[publish].endpoint` 没做 `${VAR}` 展开**：栈渲染的
+     `https://${CONSOLE_ADVERTISE_HOST}:…` 会被原样当成主机名，证书能签出来、注册也“成功”，
+     真错要等 cred 拨号才暴露（而且错在对方）。现在启动期就展开，变量没渲染则当场报
+     `unresolved environment variable`；
+  2. `[verify].require_signature` / `[init].insecure_tls` 只认 TOML 字面 bool，栈没法用变量切。
+     现在字面 `true` 与字符串 `"true"` / `"${VAR}"` 都认；值不认识就是启动期错误，
+     不退化成“默认关掉一个安全开关”。
+- 没开验签时不再为“公钥还没下发”打 `warn`（那是新部署的正常状态），
+  只在“文件在但读不了”时告警。
+
 ## 0.2.0 · 2026-11-05
 
 - **自注册（P1）**：`cred.toml` 可以不带 `[identity]`，只给 `[init]` + `[publish]` ——

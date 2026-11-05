@@ -43,6 +43,9 @@ struct CredFile {
 }
 
 /// 自注册（初始化页）的配置。
+///
+/// 字符串字段都支持 `${VAR}`（由 `expand_secret` 展开：密钥文件 + 进程环境）——
+/// 栈靠变量切信任锚与开关，而不是让人改这份文件。
 #[derive(Debug, Deserialize)]
 struct InitSection {
     /// 部署生成的秘密：证明“我有权给这台机器指定 cred 地址”。
@@ -50,11 +53,11 @@ struct InitSection {
     /// cred 注册入口；不给就由用户在初始化页里填。
     #[serde(default)]
     cred_url: Option<String>,
-    /// 信任锚（入口的自签 CA）；配了就不靠人眼看指纹。
+    /// 信任锚（入口的自签 CA）；配了就不靠人眼看指纹。空串 = 没配。
     #[serde(default)]
-    ca_file: Option<PathBuf>,
+    ca_file: Option<String>,
     #[serde(default)]
-    insecure_tls: bool,
+    insecure_tls: Option<Boolish>,
 }
 
 /// 本机在 cred 眼里的收数地址（**部署事实**，由栈渲染，不由命令行给）。
@@ -83,13 +86,42 @@ struct VerifySection {
     allowed_issuers: Vec<String>,
     /// 记录必须带签发方 Ed25519 签名。
     #[serde(default)]
-    require_signature: bool,
+    require_signature: Option<Boolish>,
     /// 签发方公钥（一行一把，轮换期可两把）。
     #[serde(default)]
     issuer_public_key_file: Option<PathBuf>,
     /// 本服务认的角色词汇表（cred 侧只能在里面选）。
     #[serde(default)]
     roles: Vec<String>,
+}
+
+/// 布尔值：TOML 里可以写 `true`，也可以写 `"${VAR}"`（栈用变量切换）。
+///
+/// 字符串按展开后的 `true/false|1/0|yes/no|on/off` 解析；展开失败或值不认识都是**启动期错误** ——
+/// 不让“变量没渲染”退化成“默认关掉一个安全开关”。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Boolish {
+    Bool(bool),
+    Text(String),
+}
+
+impl Boolish {
+    fn resolve(&self, field: &str) -> Result<bool, String> {
+        match self {
+            Self::Bool(value) => Ok(*value),
+            Self::Text(raw) => {
+                let expanded = crate::config::expand_secret(raw)?;
+                match expanded.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => Ok(true),
+                    "false" | "0" | "no" | "off" => Ok(false),
+                    other => Err(format!(
+                        "{field}: expected true|false (optionally via ${{VAR}}), got {other:?}"
+                    )),
+                }
+            }
+        }
+    }
 }
 
 /// 装配好的凭据运行时。
@@ -263,6 +295,11 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         }
     }
 
+    let require_signature = match &cred.verify.require_signature {
+        Some(value) => value.resolve("[verify].require_signature")?,
+        None => false,
+    };
+
     let listen: SocketAddr = config
         .listen_addr
         .parse()
@@ -290,18 +327,45 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         }
     };
 
+    let endpoint = match &cred.publish {
+        Some(publish) => {
+            // 同样要展开：`https://${CONSOLE_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
+            // 不展开的后果很隐蔽 —— 占位符能当一个“主机名”用，证书真能签出来，
+            // 直到 cred 拨号才失败（而且错在对方）。
+            let expanded = crate::config::expand_secret(&publish.endpoint)?;
+            if expanded.trim().is_empty() {
+                String::new()
+            } else {
+                expanded
+            }
+        }
+        None => String::new(),
+    };
+
     let mut peer_config = PeerConfig::new(cred.verify.audience.clone(), &config.store_path)
         .known_roles(cred.verify.roles.iter().cloned())
-        .require_signature(cred.verify.require_signature)
+        .require_signature(require_signature)
         // 自注册要靠它推导状态（材料齐不齐）与上报地址。
         .identity(identity)
-        .publish_endpoint(
-            cred.publish
-                .as_ref()
-                .map(|publish| publish.endpoint.clone())
-                .unwrap_or_default(),
-        );
+        .publish_endpoint(endpoint);
     if let Some(init) = &cred.init {
+        // 信任锚：可能是 `${CONSOLE_CRED_CA_FILE}`，也可能没配（空串）。
+        let ca_file = match &init.ca_file {
+            Some(raw) => {
+                let expanded = crate::config::expand_secret(raw)?;
+                let trimmed = expanded.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(base.join(trimmed))
+                }
+            }
+            None => None,
+        };
+        let insecure_tls = match &init.insecure_tls {
+            Some(value) => value.resolve("[init].insecure_tls")?,
+            None => false,
+        };
         peer_config = peer_config.init(InitConfig {
             // `cred.toml` 不是 BFF 的 RawConfig，但秘密仍走同一个密钥文件：
             // `setup_code = "${SEC_CONSOLE_PEER_SETUP_CODE}"`。
@@ -310,14 +374,8 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
                 Some(value) => Some(crate::config::expand_secret(value)?),
                 None => None,
             },
-            ca_file: init
-                .ca_file
-                .as_ref()
-                // 栈用变量渲染：`ca_file = "${CONSOLE_CRED_CA_FILE}"`，没配时就是空字符串。
-                // 空字符串在这里必须当成“没配”，否则会被拼成目录路径而在启动期报不存在。
-                .filter(|path| !path.as_os_str().is_empty())
-                .map(|path| base.join(path)),
-            insecure_tls: init.insecure_tls,
+            ca_file,
+            insecure_tls,
         });
     }
     for issuer in &cred.verify.allowed_issuers {
@@ -325,7 +383,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
     }
     if let Some(path) = &cred.verify.issuer_public_key_file {
         let path = base.join(path);
-        for key in load_issuer_keys(&path, cred.verify.require_signature)? {
+        for key in load_issuer_keys(&path, require_signature)? {
             peer_config = peer_config.issuer_public_key(key);
         }
     }
@@ -421,11 +479,20 @@ fn load_issuer_keys(path: &Path, required: bool) -> Result<Vec<Vec<u8>>, String>
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if !required => {
-            log::warn!(
-                "credentials: issuer public key {} is not readable ({err}); \
-                 signature verification is disabled, so this is not fatal",
-                path.display()
-            );
+            // 没开验签时“公钥还没下发”是**正常状态**（自注册之前 / 这台部署不验签），
+            // 用 warn 会在每个新部署的启动日志里制造一条假问题；只有“文件在但读不了”才值得说。
+            if path.exists() {
+                log::warn!(
+                    "credentials: issuer public key {} is not readable ({err}); \
+                     signature verification is disabled",
+                    path.display()
+                );
+            } else {
+                log::debug!(
+                    "credentials: no issuer public key at {} yet; signature verification is off",
+                    path.display()
+                );
+            }
             return Ok(Vec::new());
         }
         Err(err) => return Err(format!("read {}: {err}", path.display())),
@@ -632,5 +699,64 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
         )
         .expect_err("must refuse");
         assert!(error.contains("no usable host"), "{error}");
+    }
+
+    // ── 开关能用变量给（栈不改文件就能切） ──
+
+    /// 只把 `[init].insecure_tls` 的写法参数化（其余固定）：
+    /// 放在 `[init]` 里写，不能“尾部追加”——那样会落到最后一个段里，被静默忽略。
+    fn init_toml(insecure_tls: &str) -> String {
+        format!(
+            "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\ninsecure_tls = {insecure_tls}\n\n[publish]\nendpoint = \"https://console.internal:18802/api/v1/internal/credentials\"\n"
+        )
+    }
+
+    #[test]
+    fn a_bool_can_be_written_as_a_literal_or_as_a_string() {
+        let dir = temp_dir("boolish");
+        // 字面 bool
+        let runtime = build_from(&dir, &init_toml("true")).expect("literal bool must parse");
+        assert!(!runtime.is_initialized());
+
+        // 引号里的字符串（栈用 `"${CONSOLE_CRED_INSECURE_TLS}"`）
+        build_from(&dir, &init_toml("\"false\"")).expect("quoted string must parse");
+    }
+
+    #[test]
+    fn an_unparseable_bool_is_a_startup_error() {
+        let dir = temp_dir("boolish-bad");
+        let error = build_from(&dir, &init_toml("\"maybe\"")).expect_err("must refuse");
+        assert!(error.contains("insecure_tls"), "{error}");
+    }
+
+    #[test]
+    fn require_signature_switched_on_by_a_string_really_applies() {
+        // 开了验签但没有公钥：启动期就报 —— 证明 `"true"` 真的被当成开关，
+        // 而不是“看起来配了实际没开”。
+        let dir = temp_dir("sigwire");
+        let error = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}require_signature = \"true\"\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://console.internal:18802/api/v1/internal/credentials\"\n"
+            ),
+        )
+        .expect_err("must refuse");
+        assert!(error.contains("issuer-signing.pub"), "{error}");
+    }
+
+    #[test]
+    fn an_unresolved_publish_endpoint_is_a_startup_error() {
+        // 栈渲染的地址是 `https://${CONSOLE_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
+        // 变量没渲染时必须**当场**报：占位符能冒充一个主机名，证书真能签出来，
+        // 错要等到 cred 拨号才暴露（而且错在对方）。
+        let dir = temp_dir("endpointvar");
+        let error = build_from(
+            &dir,
+            &format!(
+                "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://${{CONSOLE_ADVERTISE_HOST_UNSET}}:18802/api/v1/internal/credentials\"\n"
+            ),
+        )
+        .expect_err("must refuse");
+        assert!(error.contains("unresolved environment variable"), "{error}");
     }
 }
