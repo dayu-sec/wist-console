@@ -27,7 +27,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/health", get(health))
         .route("/api/evidence", get(list_evidence))
@@ -45,7 +45,45 @@ pub fn router(state: AppState) -> Router {
             "/api/evidence/{artifact_id}/content",
             get(get_evidence_content),
         )
-        .with_state(state)
+        .with_state(state.clone());
+
+    // 未初始化时只放行 `/__init`（和 `/healthz`）：业务面一律 503 ——
+    // 否则会出现“页面能打开但永远 401”的半可用现场。
+    router = router.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_initialized,
+    ));
+
+    // 自注册：未初始化时 `GET/POST /__init`；初始化后它自己回 409。
+    if let Some(credentials) = state.credentials.as_ref() {
+        router = router.merge(wist_cred_peer::init_router(credentials.peer()));
+    }
+    router
+}
+
+/// 未初始化（没有 cred 材料）时，`/api/*` 一律 503。
+async fn require_initialized(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let uninitialized = state
+        .credentials
+        .as_ref()
+        .is_some_and(|credentials| !credentials.is_initialized());
+    if uninitialized && request.uri().path().starts_with("/api/") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "peer_not_initialized",
+                    "message": "this console has no cred materials yet: open /__init to register it",
+                }
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -634,7 +672,13 @@ fn credentials_interface(state: &AppState) -> serde_json::Value {
     let alive = credentials.listener_alive();
     let listen = credentials.listen();
 
-    let (status, detail) = if !alive {
+    let (status, detail) = if !credentials.is_initialized() {
+        (
+            "unavailable",
+            "尚未初始化：浏览器打开 /__init，填 setup code + 接入券完成注册（业务面现在全部 503）"
+                .to_string(),
+        )
+    } else if !alive {
         (
             "unavailable",
             format!(

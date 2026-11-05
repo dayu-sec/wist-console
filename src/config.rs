@@ -128,6 +128,14 @@ fn expand(env: &EnvDict, value: &str) -> anyhow::Result<String> {
     Ok(expanded)
 }
 
+/// 给**不受 `RawConfig` 管的文件**（如 `cred.toml`）用的展开：`${SEC_…}` / `${ENV}`。
+/// `cred.toml` 是 cred-peer 的配置格式，不过 BFF 的 `RawConfig`；但里面的秘密
+/// （`[init].setup_code`）必须同样走密钥文件，而不是写死在栈模板里。
+pub(crate) fn expand_secret(value: &str) -> Result<String, String> {
+    let env = secret_dict().map_err(|err| format!("{err}"))?;
+    expand(&env, value).map_err(|err| format!("{err}"))
+}
+
 fn secret_dict() -> anyhow::Result<EnvDict> {
     let mut dict = match std::env::var_os(SEC_FILE_ENV).filter(|path| !path.is_empty()) {
         Some(path) => load_sec_file(Path::new(&path))?,

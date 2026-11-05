@@ -466,3 +466,94 @@ async fn atlas_reads_go_through_the_bff() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "atlas_path_invalid");
 }
+
+/// 自注册闸门：没有 cred 材料时业务面一律 503，只留 `/__init`（与容器的 `/healthz`）。
+///
+/// 这一条防的是"半可用现场"：页面能打开、接口永远 401，运维只能猜。
+#[tokio::test]
+async fn an_uninitialized_console_serves_only_the_init_page() {
+    let dir = std::env::temp_dir().join(format!(
+        "wist-console-init-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0),
+        // macOS 的 `SystemTime` 只到微秒：只靠时间戳，两个测试会撞同一目录。
+        {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let cred_file = dir.join("cred.toml");
+    std::fs::write(
+        &cred_file,
+        r#"
+[verify]
+audience = "wist-console"
+allowed_issuers = ["wist-cred"]
+roles = ["read"]
+
+[init]
+setup_code = "crp_test_setup_code"
+
+[publish]
+endpoint = "https://console.internal:18802/api/v1/internal/credentials"
+"#,
+    )
+    .expect("cred.toml");
+
+    let runtime = wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+        file: cred_file,
+        listen_addr: "127.0.0.1:0".to_string(),
+        store_path: dir.join("credentials.json"),
+        required_roles: vec!["read".to_string()],
+    })
+    .expect("credentials");
+    assert!(!runtime.is_initialized());
+
+    let base = spawn_stub().await;
+    let mut app_state = state(config(base, AuthMode::Cred));
+    app_state.credentials = Some(Arc::new(runtime));
+    let app = api::router(app_state);
+
+    // 业务面 → 503，并给出可执行的下一步（去 /__init），而不是 401。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/evidence")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "peer_not_initialized");
+
+    // 容器的健康检查不能被闸门拦住，否则 compose 会一直重启。
+    let (status, _) = call(
+        &app,
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 初始化页本身可用。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/__init")
+            .header("accept", "application/json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "uninitialized");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
