@@ -32,6 +32,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/evidence", get(list_evidence))
         .route("/api/integration", get(integration))
+        // 资产拓扑的数据面走 BFF：atlas-web 在 `/atlas/` 里发起的 `/atlas/api/...` 被反代到这里，
+        // 所以令牌校验与其它 `/api/*` 是同一道门（不再从 nginx 直连 atlas）。
+        // 只放 GET：atlas 的写端点是同一监听的 `/internal/atlas`（POST），浏览器不该碰得到。
+        .route("/api/atlas/{*rest}", get(proxy_atlas))
         .route(
             "/api/evidence/{artifact_id}",
             get(get_evidence).post(presign_evidence),
@@ -293,6 +297,74 @@ async fn get_evidence_content(
         Ok(response) => passthrough_uncached(response),
         Err(err) => upstream_failed(err),
     }
+}
+
+/// 资产拓扑读接口的代理：`GET /api/atlas/hosts` → `{atlas.base_url}/hosts`。
+///
+/// 为什么放在 BFF 而不是让 nginx 直连 atlas：`/atlas/` 里的前端是 iframe，它拿不到
+/// 我们塞在 JS 里的令牌；把它收到 BFF 后面，鉴权就只有一条路（`require_operator`）。
+async fn proxy_atlas(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rest): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    if let Err(err) = require_operator(&state, &headers) {
+        return err.into_response();
+    }
+    let Some(atlas) = state.config.atlas.as_ref() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "atlas_not_configured",
+            "this console has no atlas.base_url configured",
+        );
+    };
+    // 写端点与路径穿越都不放行：这里只代理 atlas 的公开读接口。
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty()
+        || rest.contains("..")
+        || rest.contains("//")
+        || rest.starts_with("internal")
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "atlas_path_invalid",
+            "invalid atlas path",
+        );
+    }
+
+    let mut url = format!("{}/{rest}", atlas.base_url.trim_end_matches('/'));
+    if let Some(query) = query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let response = match state.http.get(&url).send().await {
+        Ok(response) => response,
+        Err(err) => return upstream_failed(err.to_string()),
+    };
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(err) => return upstream_failed(err.to_string()),
+    };
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/json")),
+    );
+    // 拓扑数据是“某一刻的状态”，不进浏览器缓存。
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn presign_evidence(

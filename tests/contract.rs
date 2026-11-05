@@ -91,6 +91,11 @@ async fn spawn_stub() -> String {
         .route("/healthz", get(|| async { "ok" }))
         // VictoriaMetrics 的健康端点（console 的 metrics 探活用）。
         .route("/health", get(|| async { "OK" }))
+        // atlas 的读接口（console 以 `/api/atlas/*` 代理过去）。
+        .route(
+            "/hosts",
+            get(|| async { axum::Json(json!({ "status": "ok", "data": { "hosts": [] } })) }),
+        )
         .route("/internal/evidence", get(stub_list))
         .route(
             "/internal/evidence/{artifact_id}",
@@ -403,4 +408,52 @@ async fn write_interface_reports_the_probe() {
     let detail = write["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("写探针"), "{detail}");
     assert!(detail.contains("成功"), "{detail}");
+}
+
+#[tokio::test]
+async fn atlas_reads_go_through_the_bff() {
+    let base = spawn_stub().await;
+    let mut cfg = config(base.clone(), AuthMode::Ingress);
+    cfg.atlas = Some(AtlasConfig {
+        base_url: base,
+        sink_url: None,
+    });
+    let app = api::router(state(cfg));
+
+    // 没有身份 → 401：资产数据面与其它 /api/* 是同一道门。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/atlas/hosts")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // 有身份 → 透传 atlas 的响应，并加 no-store。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/atlas/hosts")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["hosts"].as_array().unwrap().len(), 0);
+
+    // 写端点前缀（/internal/*）不经过 BFF 暴露给浏览器。
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/atlas/internal/atlas")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "atlas_path_invalid");
 }
