@@ -5,7 +5,7 @@
 - 新增 `[metrics] base_url`（VictoriaMetrics）：`/api/health` 多一条「运行指标存储」探活，
   `sources.metrics` 从 `not_configured` 变成真实状态。
 - `[atlas]` 新增 `sink_url`（**数据面视角**的写端点），`/api/integration` 多一块 `atlas` 接入示例
-  （三字段 + DSNAP 的 `content`），`warp_parse.env` 相应多一个 `ATLAS_SINK_URL`。
+  （两字段 `{cust_id, content}`，`content` 是 DSNAP 记录），`warp_parse.env` 相应多一个 `ATLAS_SINK_URL`。
 - atlas 的 `/healthz` 现在也带 `probe` 块，接口可用性页会像证据写端点一样显示
   「写探针 N 秒前成功」——两条写链路同一套判据。
 

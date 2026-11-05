@@ -202,9 +202,10 @@ batch_size = 1
             "auth": "none",
             // `cust_id` 是 atlas 的租户 UUID（不是客户号）：一个 wparse 可以写多个租户。
             "customer": "<atlas 租户 UUID>",
+            // 资产拓扑写端点：只有两个字段 —— 证据服务的 `cmd_id` 是它自己的幂等键，
+            // atlas 写的是状态快照，幂等键在快照的 `snap_id` 里。
             "record": {
                 "cust_id": "<atlas 租户 UUID>",
-                "cmd_id": "cmd-discovery-20261105-001",
                 "content": { "schema": "v1", "biz": "agent-discovery", "body": "<DSNAP 快照 JSON 字符串>" },
             },
         })
@@ -223,7 +224,7 @@ batch_size = 1
                 "content": { "summary": { "overall": "warn" }, "findings": [] },
             },
         },
-        // 资产拓扑写端点：与证据服务**同一个三字段形状**，只是 `content` 是 DSNAP 记录。
+        // 资产拓扑写端点：只有两个字段（证据服务的 `cmd_id` 是它自己的幂等键）。
         "atlas": atlas,
         "warp_parse": {
             "connector": connector,
