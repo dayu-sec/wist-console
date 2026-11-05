@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 0.3.0 · 2026-11-05
+
+- **新增 `POST /api/login`**：把访问令牌换成「你是谁 + 给了什么角色」
+  （`{credential_id, subject, roles, audience, expires_at}`）。契约由 `wist-cred-peer` 0.5
+  统一：401 `credential_missing` / `credential_invalid`、403 `role_required`、
+  503 `credential_store_unavailable`。其它接口仍是每请求 Bearer —— 登录只回答“这串是谁”，
+  不换 session。前端据此能把「令牌不对」和「角色不够」分开说。
+- **修 0.2.0 的自注册启动死锁**：`require_signature = true` + 尚未初始化 + 公钥不在时，
+  原来是启动期拒 —— 但公钥是自注册时随 bundle 下发的，于是进程起不来、永远打不开 `/__init`。
+  现在只在**未初始化**时延后验签（WARN + 健康页写出来）；已初始化仍缺公钥照样拒启动。
+- **运行期降级状态显式可见**：材料在运行中被删 → `is_initialized()` 立刻变 false，
+  但 listener 还握着启动时加载的证书。503 响应体与健康页都会说“重新注册后必须**重启**”。
+- `client-ca.pem` 在、但读不了（权限/损坏）→ 启动期报错。原来会滑进“未初始化”分支：
+  cred-peer 认为已初始化（`/__init` 回 409），listener 又起不来，表现成“一切正常但推不进来”。
+- 依赖 `wist-cred-peer` **0.5**。
+- 用例：单测 23、契约 16。
+
 ## 0.2.1 · 2026-11-05
 
 - 修 0.2.0 里两个「配了但没生效」——都是靠真配置启动才发现的那类：
