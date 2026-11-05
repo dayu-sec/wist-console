@@ -216,47 +216,6 @@ async fn integration(State(state): State<AppState>, headers: HeaderMap) -> Respo
     let sink_base = sink_base.trim_end_matches('/').to_string();
     let write_url = format!("{sink_base}/internal/evidence");
 
-    // 连接器只负责 POST，**不做字段映射**；发出去的就是 OML 的输出。
-    // 三字段（cust_id / cmd_id / content）+ 证据服务 `auth = "none"`：不需要 token。
-    let connector = format!(
-        r#"[[connectors]]
-allow_override = ["endpoint", "headers", "fmt", "batch_size", "timeout_secs", "max_retries"]
-id = "evidence_sink"
-type = "http"
-
-[connectors.params]
-endpoint = "{write_url}"
-method = "POST"
-fmt = "json"
-batch_size = 1
-timeout_secs = 5
-max_retries = 3
-compression = "none"
-
-[connectors.params.headers]
-Content-Type = "application/json"
-"#
-    );
-
-    let sink_group = format!(
-        r#"[sink_group]
-name = "evidence-uplink"
-oml = ["evidence_uplink"]
-tags = ["biz:evidence"]
-batch_size = 1
-batch_timeout_ms = 300
-
-[[sink_group.sinks]]
-name = "evidence"
-connect = "evidence_sink"
-tags = ["sink:evidence"]
-
-[sink_group.sinks.params]
-endpoint = "{write_url}"
-batch_size = 1
-"#
-    );
-
     // 环境变量只给**数据面能看到的**地址；atlas 没配写地址就不出现在 env 里。
     let atlas_base = state.config.atlas.as_ref().and_then(|atlas| {
         atlas
@@ -300,9 +259,9 @@ batch_size = 1
         },
         // 资产拓扑写端点：只有两个字段（证据服务的 `cmd_id` 是它自己的幂等键）。
         "atlas": atlas,
+        // 接入样板里的 sink 分组由页面现场拼（复用现成的 `http_sink`），
+        // BFF 只回数据面要用的环境变量 —— 不再下发 `[[connectors]]` 定义。
         "warp_parse": {
-            "connector": connector,
-            "sink_group": sink_group,
             "env": env,
         },
     }))

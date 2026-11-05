@@ -303,15 +303,9 @@ async fn integration_page_shows_the_sink_contract() {
     assert_eq!(body["evidence"]["record"]["cust_id"], "t-001");
     assert_eq!(body["evidence"]["record"]["cmd_id"], "cmd-20261105-001");
 
-    let connector = body["warp_parse"]["connector"].as_str().unwrap();
-    assert!(connector.contains("evidence_sink"));
-    assert!(connector.contains("http://10.0.0.5:18800/internal/evidence"));
-    // 认证放宽后连接器不应再带用户名/口令，也不该出现 token 占位符。
-    assert!(!connector.contains("username"), "{connector}");
-    assert!(!connector.contains("EVIDENCE_SINK_TOKEN"), "{connector}");
-
-    let sink_group = body["warp_parse"]["sink_group"].as_str().unwrap();
-    assert!(sink_group.contains("evidence_uplink"), "{sink_group}");
+    // 接入页不再下发连接器定义：统一复用现成的 `http_sink`，BFF 只给环境变量。
+    assert!(body["warp_parse"]["connector"].is_null());
+    assert!(body["warp_parse"]["sink_group"].is_null());
     assert_eq!(
         body["warp_parse"]["env"]["EVIDENCE_SINK_URL"],
         "http://10.0.0.5:18800"
