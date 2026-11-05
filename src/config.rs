@@ -21,6 +21,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub evidence: EvidenceConfig,
     pub atlas: Option<AtlasConfig>,
+    pub metrics: Option<MetricsConfig>,
     pub integration: IntegrationConfig,
 }
 
@@ -67,6 +68,16 @@ pub struct EvidenceConfig {
 
 #[derive(Debug, Clone)]
 pub struct AtlasConfig {
+    /// 资产拓扑读接口（`/healthz`、`/api/*`）。
+    pub base_url: String,
+    /// 数据面能看到的 atlas 写端点（`http://<内网地址>:<端口>/internal/atlas`）。
+    /// 与 `integration.sink_url` 同一个意思：给运维 copy，不是 BFF 自己用的地址。
+    pub sink_url: Option<String>,
+}
+
+/// VictoriaMetrics（或任何兼容的 Prometheus 查询 API）。
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
     pub base_url: String,
 }
 
@@ -135,6 +146,8 @@ struct RawConfig {
     evidence: RawEvidence,
     #[serde(default)]
     atlas: Option<RawAtlas>,
+    #[serde(default)]
+    metrics: Option<RawMetrics>,
     #[serde(default)]
     integration: RawIntegration,
 }
@@ -233,6 +246,13 @@ fn default_timeout() -> u64 {
 #[derive(Debug, Deserialize)]
 struct RawAtlas {
     base_url: String,
+    #[serde(default)]
+    sink_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMetrics {
+    base_url: String,
 }
 
 impl RawConfig {
@@ -288,8 +308,19 @@ impl RawConfig {
             atlas: match self.atlas {
                 Some(atlas) => Some(AtlasConfig {
                     base_url: expand(env, &atlas.base_url)?,
+                    sink_url: if atlas.sink_url.trim().is_empty() {
+                        None
+                    } else {
+                        Some(expand(env, &atlas.sink_url)?)
+                    },
                 }),
                 None => None,
+            },
+            metrics: match self.metrics {
+                Some(metrics) if !metrics.base_url.trim().is_empty() => Some(MetricsConfig {
+                    base_url: expand(env, &metrics.base_url)?,
+                }),
+                _ => None,
             },
             integration: IntegrationConfig {
                 sink_url: if self.integration.sink_url.trim().is_empty() {

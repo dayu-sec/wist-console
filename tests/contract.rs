@@ -15,7 +15,8 @@ use tower::ServiceExt;
 
 use wist_console::api::{self, AppState};
 use wist_console::config::{
-    AtlasConfig, AuthConfig, AuthMode, Config, EvidenceConfig, IntegrationConfig, ServerConfig,
+    AtlasConfig, AuthConfig, AuthMode, Config, EvidenceConfig, IntegrationConfig, MetricsConfig,
+    ServerConfig,
 };
 use wist_console::upstream::EvidenceClient;
 
@@ -36,6 +37,7 @@ fn config(base_url: String, mode: AuthMode) -> Config {
             timeout_secs: 5,
         },
         atlas: None,
+        metrics: None,
         integration: IntegrationConfig {
             sink_url: None,
             sink_health_url: None,
@@ -85,6 +87,8 @@ async fn stub_content(Path(artifact_id): Path<String>) -> axum::Json<Value> {
 async fn spawn_stub() -> String {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // VictoriaMetrics 的健康端点（console 的 metrics 探活用）。
+        .route("/health", get(|| async { "OK" }))
         .route("/internal/evidence", get(stub_list))
         .route(
             "/internal/evidence/{artifact_id}",
@@ -213,7 +217,7 @@ async fn health_reports_unconfigured_domains() {
     // 接口可用性：读端点探的是一次**真实读**（鉴权 + PG 索引都会走到），
     // 写端点与 atlas 没配地址时显式 `not_configured`。
     let interfaces = body["interfaces"].as_array().expect("interfaces array");
-    assert_eq!(interfaces.len(), 3, "{body}");
+    assert_eq!(interfaces.len(), 4, "{body}");
     assert_eq!(interfaces[0]["id"], "evidence_read");
     assert_eq!(interfaces[0]["status"], "ok", "{body}");
     assert!(interfaces[0]["latency_ms"].is_u64());
@@ -228,6 +232,8 @@ async fn health_reports_unconfigured_domains() {
     assert_eq!(interfaces[1]["status"], "not_configured");
     assert_eq!(interfaces[2]["id"], "atlas");
     assert_eq!(interfaces[2]["status"], "not_configured");
+    assert_eq!(interfaces[3]["id"], "metrics");
+    assert_eq!(interfaces[3]["status"], "not_configured");
 }
 
 #[tokio::test]
@@ -236,8 +242,12 @@ async fn interfaces_are_probed_when_configured() {
     let mut cfg = config(base.clone(), AuthMode::Ingress);
     cfg.atlas = Some(AtlasConfig {
         base_url: base.clone(),
+        sink_url: None,
     });
     cfg.integration.sink_health_url = Some(format!("{base}/healthz"));
+    cfg.metrics = Some(MetricsConfig {
+        base_url: base.clone(),
+    });
     let app = api::router(state(cfg));
     let request = Request::builder()
         .uri("/api/health")
@@ -294,7 +304,10 @@ async fn integration_page_shows_the_sink_contract() {
 async fn atlas_is_probed_when_configured() {
     let base = spawn_stub().await;
     let mut cfg = config(base.clone(), AuthMode::Ingress);
-    cfg.atlas = Some(AtlasConfig { base_url: base });
+    cfg.atlas = Some(AtlasConfig {
+        base_url: base,
+        sink_url: None,
+    });
     let app = api::router(state(cfg));
     let request = Request::builder()
         .uri("/api/health")

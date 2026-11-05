@@ -69,16 +69,20 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .atlas
         .as_ref()
         .map(|atlas| format!("{}/healthz", atlas.base_url.trim_end_matches('/')));
+    let metrics_url = state
+        .config
+        .metrics
+        .as_ref()
+        .map(|metrics| format!("{}/health", metrics.base_url.trim_end_matches('/')));
 
     // 并发探活：一个上游挂掉不该把另外两个的延迟一起拖长。
-    let (read_iface, write_iface, atlas_iface) = tokio::join!(
+    let (read_iface, write_iface, atlas_iface, metrics_iface) = tokio::join!(
         probe_evidence_read(&state),
         probe_opt(
             &state.http,
             "evidence_write",
             "证据写端点",
-            "BFF → 证据写监听：端口就绪。不发写入（不往证据库里塞测试数据），
-数据面到该地址的网络可达性只能由数据面自己验证。",
+            "BFF → 证据写监听：端口就绪 + 服务自报的写探针（每 5 分钟一笔真写入）。\n数据面到该地址的网络可达性只能由数据面自己验证。",
             write_url,
             "未配置 integration.sink_health_url（BFF 视角的探活地址）",
         ),
@@ -86,16 +90,25 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
             &state.http,
             "atlas",
             "资产拓扑 API",
-            "BFF → 资产拓扑：`/healthz` 进程就绪（不查 PG，避免探活变成一次业务查询）。",
+            "BFF → 资产拓扑：`/healthz` 进程就绪 + 服务自报的写探针\n（转换 → 落库 → 物化 一整条；与 evidence 的 `probe` 块同一形状）。",
             atlas_url,
             "未配置 atlas.base_url",
+        ),
+        probe_opt(
+            &state.http,
+            "metrics",
+            "运行指标存储",
+            "BFF → VictoriaMetrics：`/health` 可查询。只证明存储活着，\n不代表数据面正在上报（那是数据面自己的事）。",
+            metrics_url,
+            "未配置 metrics.base_url",
         ),
     );
 
     // `sources` 由同一次探活派生，不再重复发请求。
     let evidence = source_from(&read_iface);
     let atlas = source_from(&atlas_iface);
-    let interfaces = vec![read_iface, write_iface, atlas_iface];
+    let metrics = source_from(&metrics_iface);
+    let interfaces = vec![read_iface, write_iface, atlas_iface, metrics_iface];
 
     Json(Health {
         status: "ok",
@@ -103,10 +116,7 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         sources: json!({
             "evidence": evidence,
             "atlas": atlas,
-            "metrics": {
-                "status": "not_configured",
-                "detail": "运行指标还没有平台侧聚合（VM 在各网关栈里）",
-            },
+            "metrics": metrics,
             "devices": {
                 "status": "not_configured",
                 "detail": "containment_capabilities 尚未上报",
@@ -173,6 +183,33 @@ batch_size = 1
 "#
     );
 
+    // 环境变量只给**数据面能看到的**地址；atlas 没配写地址就不出现在 env 里。
+    let atlas_base = state.config.atlas.as_ref().and_then(|atlas| {
+        atlas
+            .sink_url
+            .as_ref()
+            .map(|sink_url| sink_url.trim_end_matches('/').to_string())
+    });
+    let mut env = serde_json::Map::new();
+    env.insert("EVIDENCE_SINK_URL".to_string(), json!(sink_base));
+    if let Some(atlas_base) = atlas_base.as_ref() {
+        env.insert("ATLAS_SINK_URL".to_string(), json!(atlas_base));
+    }
+
+    let atlas = atlas_base.map(|base| {
+        json!({
+            "write_url": format!("{base}/internal/atlas"),
+            "auth": "none",
+            // `cust_id` 是 atlas 的租户 UUID（不是客户号）：一个 wparse 可以写多个租户。
+            "customer": "<atlas 租户 UUID>",
+            "record": {
+                "cust_id": "<atlas 租户 UUID>",
+                "cmd_id": "cmd-discovery-20261105-001",
+                "content": { "schema": "v1", "biz": "agent-discovery", "body": "<DSNAP 快照 JSON 字符串>" },
+            },
+        })
+    });
+
     Json(json!({
         "evidence": {
             "write_url": write_url,
@@ -186,10 +223,12 @@ batch_size = 1
                 "content": { "summary": { "overall": "warn" }, "findings": [] },
             },
         },
+        // 资产拓扑写端点：与证据服务**同一个三字段形状**，只是 `content` 是 DSNAP 记录。
+        "atlas": atlas,
         "warp_parse": {
             "connector": connector,
             "sink_group": sink_group,
-            "env": { "EVIDENCE_SINK_URL": sink_base },
+            "env": env,
         },
     }))
     .into_response()
