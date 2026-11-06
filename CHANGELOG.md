@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 0.4.0 · 2026-11-06
+
+- **新增运行指标读接口**：`GET /api/metrics`（存储里有什么、谁在报、即时值）与
+  `GET /api/metrics/agents/{agent_id}/history`（单台趋势）。读的是**计算区自己那份**
+  VictoriaMetrics —— 数据面把 agent 采集指标镜像到这里；网关栈那份仍只服务控制面观测页。
+- **口径收在 BFF**：指标名 / label 键 / 单位换算取自 `wist-metrics`（读侧不再手写名字），
+  CPU 换算成百分比、时延换算成毫秒；用 `count_over_time` 判「采集静默」，窗口 5m–24h、
+  步长 10–900s 自动夹紧，并按点数上限放宽步长。
+- 未配置 `[metrics].base_url` 时返回 `503 metrics_not_configured`（那是「这一域还没接」，
+  不是故障）。引擎 / 管道统计（`wparse_*`）只写网关栈，不在本服务范围内。
+
 ## 0.3.1 · 2026-11-06
 
 - **`/api/integration` 不再下发连接器定义**：`warp_parse` 只保留 `env`（写端点地址），
