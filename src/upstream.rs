@@ -69,6 +69,11 @@ impl EvidenceClient {
         self.send(Method::GET, &path).await
     }
 
+    /// 部署自述（`GET /healthz`）：当前只取 `objects.kind`，`probe` 细节不转给前端。
+    pub async fn health(&self) -> Result<UpstreamResponse, String> {
+        self.send(Method::GET, "/healthz").await
+    }
+
     pub async fn get(&self, artifact_id: &str) -> Result<UpstreamResponse, String> {
         self.send(Method::GET, &format!("/internal/evidence/{artifact_id}"))
             .await

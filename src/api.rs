@@ -32,6 +32,9 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/api/health", get(health))
         .route("/api/evidence", get(list_evidence))
+        // 能力自述：页面据此选「打开正文」的通路（签名 URL / BFF 代理读）。
+        // 静态段优先于下面的 `/api/evidence/{artifact_id}`，不会把 artifact id 吃掉。
+        .route("/api/evidence/capabilities", get(evidence_capabilities))
         .route("/api/integration", get(integration))
         // 运行指标：读 console 栈自己那份 VictoriaMetrics（数据面镜像写进来的）。
         // 概览 + 单台 agent 的趋势；两个都只读，不做跨栈聚合。
@@ -274,6 +277,42 @@ async fn integration(State(state): State<AppState>, headers: HeaderMap) -> Respo
         },
     }))
     .into_response()
+}
+
+/// `GET /api/evidence/capabilities`：证据服务的部署自述（当前只有对象后端）。
+///
+/// 页面据 `presign_supported` 决定「打开正文」走哪条路：
+/// - `objects.kind = s3`：一次 60s 单对象签名，浏览器直连对象存储；
+/// - `objects.kind = file`：没有签名 URL，走 BFF 代理读（`/api/evidence/{id}/content`）。
+///
+/// 探测失败、或老证据服务的 `/healthz` 不报 `objects` 时回 `objects_kind: null`
+/// 且 `presign_supported: true`：页面退回到「先试签名、501 再回落」的老行为 ——
+/// 能力探测失败不应该把正文读不了当结果。
+async fn evidence_capabilities(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(err) = require_operator(&state, &headers) {
+        return err.into_response();
+    }
+    let response = match state.evidence.health().await {
+        Ok(response) => response,
+        Err(err) => return upstream_failed(err),
+    };
+    let objects_kind = evidence_objects_kind(&response.body);
+    let presign_supported = objects_kind.as_deref() != Some("file");
+    Json(json!({
+        "objects_kind": objects_kind,
+        "presign_supported": presign_supported,
+    }))
+    .into_response()
+}
+
+/// 从证据服务 `/healthz` 正文里取 `objects.kind`；形状不认识就当不知道（`None`）。
+fn evidence_objects_kind(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("objects")?
+        .get("kind")?
+        .as_str()
+        .map(str::to_string)
 }
 
 async fn list_evidence(

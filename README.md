@@ -24,6 +24,12 @@ GET  /api/health
 GET  /api/evidence?kind=&subject_id=&since=&limit=&cursor=
      → 透传证据服务的 { artifacts, next_cursor }
 
+GET  /api/evidence/capabilities
+     → { objects_kind: "file"|"s3"|null, presign_supported: bool }
+       证据服务 `/healthz` 的 `objects.kind` 转成页面能用的形状：
+       `presign_supported = false`（本地文件存储）时页面直接走代理读，
+       不再先发一个必然 501 的签名请求；后端不报时退回「先试签名、失败再回落」。
+
 GET  /api/evidence/{artifact_id}
      → 透传证据服务的索引行
 

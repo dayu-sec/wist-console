@@ -175,8 +175,20 @@ async fn stub_vm_range(Query(params): Query<HashMap<String, String>>) -> axum::J
 }
 
 async fn spawn_stub() -> String {
+    spawn_stub_with_healthz(json!({ "status": "ok", "objects": { "kind": "file" } })).await
+}
+
+/// 同一个桩，但指定证据服务 `/healthz` 的正文 ——
+/// 用来验「老证据服务不报 `objects` 时不把能力当成不支持」。
+async fn spawn_stub_with_healthz(healthz_body: Value) -> String {
     let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/healthz",
+            get(move || {
+                let body = healthz_body.clone();
+                async move { axum::Json(body) }
+            }),
+        )
         // VictoriaMetrics 的健康端点（console 的 metrics 探活用）。
         .route("/health", get(|| async { "OK" }))
         .route("/api/v1/query", get(stub_vm_query))
@@ -419,6 +431,51 @@ async fn atlas_is_probed_when_configured() {
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["sources"]["atlas"]["status"], "ok");
+}
+
+#[tokio::test]
+async fn capabilities_report_the_file_backend() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/capabilities")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // `objects.kind = file`：没有签名 URL，页面直接走 BFF 代理读，不再先撞一次 501。
+    assert_eq!(body["objects_kind"], "file", "{body}");
+    assert_eq!(body["presign_supported"], false, "{body}");
+}
+
+#[tokio::test]
+async fn capabilities_leave_the_old_behaviour_when_the_backend_is_unknown() {
+    // 老证据服务的 /healthz 不报 `objects`：不能因此把签名路径判死，
+    // 否则切回 s3 的部署反而读不了正文。
+    let base = spawn_stub_with_healthz(json!({ "status": "ok" })).await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/capabilities")
+        .header("x-console-operator", "zhangsan")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["objects_kind"].is_null(), "{body}");
+    assert_eq!(body["presign_supported"], true, "{body}");
+}
+
+#[tokio::test]
+async fn capabilities_require_the_operator_header() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let request = Request::builder()
+        .uri("/api/evidence/capabilities")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = call(&app, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
