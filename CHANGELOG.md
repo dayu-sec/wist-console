@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.6.1 · 2026-11-06
+
+- **发布流水线：原生分架构构建镜像，去掉 QEMU**（与 `wist-center` 同一套）：
+  amd64 在 `ubuntu-24.04`、arm64 在 `ubuntu-24.04-arm` 各自原生构建；两个架构按 digest
+  分别推 ghcr / TCR，最后由独立 job 在每个仓库内合并多架构 manifest（不跨仓库搬层）。
+- 起因：0.6.0 的 `Build and push` 用了 **33 分钟** —— arm64 那一段在 amd64 runner 上模拟执行
+  `apt-get`。改完预期 2~3 分钟。
+- **镜像内容与行为零变化**（同基底、同二进制、同入口、同 tag 规则）。
+
 ## 0.6.0 · 2026-11-06
 
 - **改名：`wist-console` → `wist-field-api`**（crate / 二进制 / 镜像同名）：
