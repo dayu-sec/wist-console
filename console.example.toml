@@ -37,3 +37,8 @@ timeout_secs = 10
 # [integration]
 # sink_url = "http://10.0.0.5:18800"
 # sink_health_url = "http://evidence:8080/healthz"
+
+# 运行指标：读的是**本栈** VictoriaMetrics（数据面 wparse 把 agent 采集指标镜像进来）。
+# 没配 = 「运行指标」页回 503 `metrics_not_configured`（那是「没接入」，不是故障）。
+# [metrics]
+# base_url = "http://127.0.0.1:18428"

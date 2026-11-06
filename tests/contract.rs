@@ -2,11 +2,12 @@
 //!
 //! 上游是**进程内真 HTTP**（同一个 axum），不 mock：要验的正是"头有没有真的带上"。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, RawQuery};
+use axum::extract::{Path, Query, RawQuery};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::routing::get;
 use http_body_util::BodyExt;
@@ -86,11 +87,100 @@ async fn stub_content(Path(artifact_id): Path<String>) -> axum::Json<Value> {
     axum::Json(json!({ "artifact_id": artifact_id, "body": "original-report" }))
 }
 
+/// VictoriaMetrics 的 `/api/v1/query` 桩：按 PromQL 的形状回不同结果。
+///
+/// 真实 VM 的响应形状就是 `{data:{result:[{metric:{…}, value:[ts,"v"]}]}}`；
+/// 这里只需要把 BFF 的四种查询（目录 / 每 agent 序列数 / 即时值 / 样本数）区分开。
+async fn stub_vm_query(Query(params): Query<HashMap<String, String>>) -> axum::Json<Value> {
+    let expr = params.get("query").cloned().unwrap_or_default();
+    let result = if expr.contains("count by (__name__)") {
+        json!([
+            { "metric": { "__name__": "agent_cpu_ratio" }, "value": [1_700_000_000, "1"] },
+            { "metric": { "__name__": "system_memory_total_bytes" }, "value": [1_700_000_000, "1"] },
+        ])
+    } else if expr.contains("count_over_time") {
+        json!([{ "metric": { "agent": "agent-a" }, "value": [1_700_000_000, "10"] }])
+    } else if expr.contains("count by (agent)") {
+        json!([{ "metric": { "agent": "agent-a" }, "value": [1_700_000_000, "42"] }])
+    } else {
+        json!([
+            {
+                "metric": { "__name__": "agent_cpu_ratio", "agent": "agent-a", "env": "dev" },
+                "value": [1_700_000_000, "0.0816"]
+            },
+            {
+                "metric": { "__name__": "agent_memory_bytes", "agent": "agent-a", "env": "dev" },
+                "value": [1_700_000_000, "104857600"]
+            },
+            {
+                "metric": { "__name__": "agent_cpu_cores", "agent": "agent-a", "env": "dev" },
+                "value": [1_700_000_000, "8"]
+            },
+            {
+                "metric": { "__name__": "agent_admin_latency_seconds", "agent": "agent-a", "env": "dev" },
+                "value": [1_700_000_000, "0.0153"]
+            },
+            {
+                "metric": {
+                    "__name__": "agent_collect_targets",
+                    "agent": "agent-a",
+                    "target_kind": "host",
+                    "outcome": "succeeded"
+                },
+                "value": [1_700_000_000, "3"]
+            },
+            {
+                "metric": {
+                    "__name__": "agent_collect_targets",
+                    "agent": "agent-a",
+                    "target_kind": "process",
+                    "outcome": "dropped"
+                },
+                "value": [1_700_000_000, "1"]
+            },
+        ])
+    };
+    axum::Json(json!({ "status": "success", "data": { "resultType": "vector", "result": result } }))
+}
+
+/// VictoriaMetrics 的 `/api/v1/query_range` 桩：四条自观测指标各一串。
+async fn stub_vm_range(Query(params): Query<HashMap<String, String>>) -> axum::Json<Value> {
+    let expr = params.get("query").cloned().unwrap_or_default();
+    // 请求里带了 agent 过滤：BFF 必须把 URL 里的 id 拼进 PromQL。
+    assert!(expr.contains("agent-a"), "{expr}");
+    axum::Json(json!({
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": [
+                {
+                    "metric": { "__name__": "agent_cpu_ratio", "agent": "agent-a", "env": "dev" },
+                    "values": [[1_700_000_000, "0.5"], [1_700_000_030, "1.0"]]
+                },
+                {
+                    "metric": { "__name__": "agent_memory_bytes", "agent": "agent-a", "env": "dev" },
+                    "values": [[1_700_000_000, "104857600"], [1_700_000_030, "209715200"]]
+                },
+                {
+                    "metric": { "__name__": "agent_cpu_cores", "agent": "agent-a", "env": "dev" },
+                    "values": [[1_700_000_000, "8"], [1_700_000_030, "8"]]
+                },
+                {
+                    "metric": { "__name__": "agent_admin_latency_seconds", "agent": "agent-a", "env": "dev" },
+                    "values": [[1_700_000_000, "0.015"], [1_700_000_030, "0.25"]]
+                }
+            ]
+        }
+    }))
+}
+
 async fn spawn_stub() -> String {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         // VictoriaMetrics 的健康端点（console 的 metrics 探活用）。
         .route("/health", get(|| async { "OK" }))
+        .route("/api/v1/query", get(stub_vm_query))
+        .route("/api/v1/query_range", get(stub_vm_range))
         // atlas 的读接口（console 以 `/api/atlas/*` 代理过去）。
         .route(
             "/api/hosts",
@@ -766,4 +856,109 @@ roles = ["read"]
     assert_eq!(body["error"]["code"], "credential_invalid");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn metrics_page_reads_the_console_victoria_metrics() {
+    let base = spawn_stub().await;
+    let mut cfg = config(base.clone(), AuthMode::Ingress);
+    cfg.metrics = Some(MetricsConfig {
+        base_url: base.clone(),
+    });
+    let app = api::router(state(cfg));
+
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/metrics")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 存储目录：名字 + 序列数（页面按前缀分组）。
+    assert_eq!(body["totals"]["names"], 2, "{body}");
+    assert_eq!(body["totals"]["series"], 2, "{body}");
+    assert_eq!(body["totals"]["agents"], 1, "{body}");
+    assert_eq!(body["window_seconds"], 300);
+
+    // 即时值：单位在 BFF 就换算成页面口径（百分比 / 毫秒），前端不做算术。
+    let agent = &body["agents"][0];
+    assert_eq!(agent["agent_id"], "agent-a");
+    assert_eq!(agent["labels"]["env"], "dev");
+    assert_eq!(agent["series"], 42);
+    assert_eq!(agent["samples"], 10);
+    assert!((agent["cpu_percent"].as_f64().unwrap() - 8.16).abs() < 1e-6);
+    assert_eq!(agent["cpu_cores"], 8.0);
+    assert_eq!(agent["memory_bytes"], 104_857_600.0);
+    assert_eq!(agent["admin_latency_ms"], 15.0);
+    // 采集记账按 outcome 汇总；`target_kind` 不进身份 label。
+    assert_eq!(agent["collect_targets"], 4.0);
+    assert_eq!(agent["collect_dropped"], 1.0);
+    assert!(agent["labels"].get("target_kind").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn metrics_history_is_normalized_per_agent() {
+    let base = spawn_stub().await;
+    let mut cfg = config(base.clone(), AuthMode::Ingress);
+    cfg.metrics = Some(MetricsConfig {
+        base_url: base.clone(),
+    });
+    let app = api::router(state(cfg));
+
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/metrics/agents/agent-a/history?window_seconds=900&step_seconds=15")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["agent_id"], "agent-a");
+    assert_eq!(body["window_seconds"], 900);
+    assert_eq!(body["step_seconds"], 15);
+    assert_eq!(body["labels"]["env"], "dev");
+
+    let series = body["series"].as_array().expect("series");
+    assert_eq!(series.len(), 4, "{body}");
+    // 顺序跟常量表（`wist-metrics` 的 `agent::HISTORY`）走：页面横排四张图，顺序要稳定。
+    assert_eq!(series[0]["metric"], "agent_memory_bytes");
+    assert_eq!(series[0]["unit"], "bytes");
+    assert_eq!(series[1]["metric"], "agent_cpu_ratio");
+    assert_eq!(series[1]["unit"], "percent");
+    assert_eq!(series[1]["points"][0][0], 1_700_000_000_000i64);
+    assert_eq!(series[1]["points"][0][1], 50.0);
+    assert_eq!(series[1]["points"][1][1], 100.0);
+    assert_eq!(series[3]["metric"], "agent_admin_latency_seconds");
+    assert_eq!(series[3]["unit"], "milliseconds");
+    assert_eq!(series[3]["points"][1][1], 250.0);
+}
+
+#[tokio::test]
+async fn metrics_without_a_store_is_503_not_an_error_page() {
+    let base = spawn_stub().await;
+    let app = api::router(state(config(base, AuthMode::Ingress)));
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri("/api/metrics")
+            .header("x-console-operator", "zhangsan")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    // 「这一域还没接」与「存储坏了」必须分开：前者是 503 + 明确缺哪个配置项。
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"]["code"], "metrics_not_configured");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("metrics.base_url")
+    );
 }

@@ -15,6 +15,7 @@ use axum::routing::get;
 use serde_json::json;
 
 use crate::config::{AuthMode, Config};
+use crate::metrics;
 use crate::upstream::{EvidenceClient, UpstreamResponse};
 
 #[derive(Clone)]
@@ -32,6 +33,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/evidence", get(list_evidence))
         .route("/api/integration", get(integration))
+        // 运行指标：读 console 栈自己那份 VictoriaMetrics（数据面镜像写进来的）。
+        // 概览 + 单台 agent 的趋势；两个都只读，不做跨栈聚合。
+        .route("/api/metrics", get(metrics::overview))
+        .route(
+            "/api/metrics/agents/{agent_id}/history",
+            get(metrics::agent_history),
+        )
         // 资产拓扑的数据面走 BFF：atlas-web 在 `/atlas/` 里发起的 `/atlas/api/...` 被反代到这里，
         // 所以令牌校验与其它 `/api/*` 是同一道门（不再从 nginx 直连 atlas）。
         // 只放 GET：atlas 的写端点是同一监听的 `/internal/atlas`（POST），浏览器不该碰得到。
@@ -462,6 +470,13 @@ fn require_operator(
     }
 }
 
+/// 同一道门，给 api 以外的模块（运行指标）用：拒绝时直接给出响应。
+pub(crate) fn authorize(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    require_operator(state, headers)
+        .err()
+        .map(|err| err.into_response())
+}
+
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)?
@@ -823,7 +838,7 @@ fn entry(
     value
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -854,7 +869,11 @@ fn not_found() -> Response {
     )
 }
 
-fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+pub(crate) fn error_response(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) -> Response {
     (
         status,
         Json(json!({ "error": { "code": code, "message": message.into() } })),

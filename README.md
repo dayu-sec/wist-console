@@ -36,6 +36,14 @@ POST /api/evidence/{artifact_id}:presign
 GET  /api/integration
      → { evidence: { write_url, auth, allowed_kinds, ... },
          warp_parse: { connector, sink_group, env } }
+
+GET  /api/metrics
+     → { generated_at_ms, window_seconds, source, totals, agents: [...], catalog: [...] }
+     读的是**本栈** VictoriaMetrics（数据面把 agent 采集指标镜像进来），不是网关栈那份。
+
+GET  /api/metrics/agents/{agent_id}/history?window_seconds=&step_seconds=
+     → { agent_id, window_seconds, step_seconds, labels, series: [{ metric, title, unit, points }] }
+     窗口 5m–24h、步长 10–900s（越界自动夹紧）；单位已在 BFF 换算成 percent / milliseconds / bytes。
 ```
 
 `sources` 是「这个域接没接上」；`interfaces` 是「这条接口此刻通不通」——逐条探活
@@ -50,6 +58,18 @@ GET  /api/integration
    BFF 不自己拼授权结论。
 3. **不落正文**：预签名 URL 直接透传，BFF 不缓存、不代理正文；需要流式读时另开
    `/api/evidence/{id}/content`（P1），不在这个骨架上顺手加。
+
+## 运行指标
+
+两份 VictoriaMetrics **互不聚合**（谁写谁查）：
+
+- 网关栈那份：`WPARSE_VM_ENDPOINT`，给控制面观测页，含引擎 / 管道统计（`wparse_*`）；
+- 本栈那份（`[metrics] base_url`）：数据面用 `CONSOLE_VM_ENDPOINT` 把 **同一批 agent 采集指标**
+  再写一份，给星象台的「运行指标」页。
+
+所以本栈的序列数少于网关栈是正常的 —— 差值正是只写网关栈的引擎统计。指标名 / label 键 /
+单位换算全部取自 `wist-metrics` 的 `names` 常量表，读侧不再手写名字（历史上曾因此整页空白）。
+没配 `[metrics]` 时这一域回 `503 metrics_not_configured`（「没接入」，不是故障）。
 
 ## 入口身份
 

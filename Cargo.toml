@@ -12,8 +12,8 @@ anyhow = "1"
 axum = "0.8"
 env_logger = "0.11"
 log = "0.4"
-# 到证据服务的客户端：只做转发，不缓存正文。
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# 到证据服务的客户端：只做转发，不缓存正文。`query` 给运行指标拼 PromQL 参数用。
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
@@ -25,6 +25,9 @@ toml = "1.1"
 wist-cred-peer = "0.5"
 # 只有一处用到：把「摘要表读不了」和「令牌不对」分开（错误码是稳定契约）。
 wist-auth = { version = "0.3", features = ["credential"] }
+# 运行指标页读的是 agent 自观测指标：名字 / label 键 / 单位换算只从这张常量表取。
+# 读侧手写名字曾经让整页静默空白（见该 crate 的 names 模块说明）。
+wist-metrics = "0.13"
 # 凭据 listener 的 mTLS 握手（与 wist-cred-peer / wist-gwlinkd 同一份实现）。
 wist-pki = "0.1.2"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

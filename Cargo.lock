@@ -1056,6 +1056,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "jumo-derive"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c26f71c98babc48a349915af0aeeb5c4ac0747aebde4ee600fa9754b01a5ec1"
+dependencies = [
+ "jumo-derive-macros",
+]
+
+[[package]]
+name = "jumo-derive-macros"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e5f107acdd29a9e7e75070b895db080fd87cadbf8c1c1471499768a40c6b929"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1733,6 +1753,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -2774,7 +2795,20 @@ dependencies = [
  "tower",
  "wist-auth",
  "wist-cred-peer",
+ "wist-metrics",
  "wist-pki",
+]
+
+[[package]]
+name = "wist-contracts"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9e9f9cbb3305e26c37dedea4357fc3103e79939e28acef30a17dac8f9454d9d"
+dependencies = [
+ "jumo-derive",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2800,6 +2834,17 @@ dependencies = [
  "wist-auth",
  "wist-pki",
  "x509-parser",
+]
+
+[[package]]
+name = "wist-metrics"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d29316707af4391936277cf7baf4099f97df3783c045ce2f87bdaeecb6e23dfd"
+dependencies = [
+ "jumo-derive",
+ "serde",
+ "wist-contracts",
 ]
 
 [[package]]
