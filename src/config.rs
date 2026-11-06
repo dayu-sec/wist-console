@@ -12,8 +12,8 @@ use orion_sec::{SecFileFmt, load_sec_dict, load_secfile_by};
 use orion_variate::vars::{EnvChecker, EnvDict, EnvEvaluable, ValueType};
 use serde::Deserialize;
 
-const SEC_FILE_ENV: &str = "WIST_CONSOLE_SEC_FILE";
-const CONFIG_ENV: &str = "WIST_CONSOLE_CONFIG";
+const SEC_FILE_ENV: &str = "WIST_FIELD_SEC_FILE";
+const CONFIG_ENV: &str = "WIST_FIELD_CONFIG";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -105,7 +105,7 @@ impl Config {
             Some(path) => path.to_path_buf(),
             None => match std::env::var_os(CONFIG_ENV).filter(|value| !value.is_empty()) {
                 Some(value) => PathBuf::from(value),
-                None => PathBuf::from("console.toml"),
+                None => PathBuf::from("field-api.toml"),
             },
         };
         let raw = std::fs::read_to_string(&path)
@@ -269,7 +269,7 @@ fn default_auth_mode() -> String {
 }
 
 fn default_operator_header() -> String {
-    "x-console-operator".to_string()
+    "x-field-operator".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,7 +428,7 @@ mod tests {
         let config = parse(
             r#"
             [credentials]
-            file = "/etc/wist-console/cred/cred.toml"
+            file = "/etc/wist-field-api/cred/cred.toml"
 
             [evidence]
             base_url = "http://127.0.0.1:8443"
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Cred);
         let credentials = config.credentials.as_ref().expect("credentials");
         assert_eq!(credentials.required_roles, vec!["read"]);
-        assert_eq!(config.auth.operator_header, "x-console-operator");
+        assert_eq!(config.auth.operator_header, "x-field-operator");
         assert_eq!(config.evidence.scopes, vec!["evidence:read"]);
         assert_eq!(config.evidence.max_sensitivity, "paths");
         assert!(config.atlas.is_none());

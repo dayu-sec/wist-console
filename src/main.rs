@@ -1,14 +1,14 @@
-//! `wist-console` 进程入口。
+//! `wist-field-api` 进程入口。
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use wist_console::api::{self, AppState};
-use wist_console::config::{AuthMode, Config};
-use wist_console::credentials;
-use wist_console::upstream::EvidenceClient;
+use wist_field_api::api::{self, AppState};
+use wist_field_api::config::{AuthMode, Config};
+use wist_field_api::credentials;
+use wist_field_api::upstream::EvidenceClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     log::info!(
-        "wist-console starting: listen={} auth={:?} evidence={} atlas={}",
+        "wist-field-api starting: listen={} auth={:?} evidence={} atlas={}",
         config.server.listen_addr,
         config.auth.mode,
         config.evidence.base_url,

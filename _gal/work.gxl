@@ -3,8 +3,8 @@ extern mod rust,ver { path = "@{PATH}"; }
 mod envs  {
    env _common  : rust_env.init   {
     root      = ".";
-    prj_key   = "wist-console" ;
-    target_name = "wist-console";
+    prj_key   = "wist-field-api" ;
+    target_name = "wist-field-api";
 
   }
 

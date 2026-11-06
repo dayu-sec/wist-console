@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 0.6.0 · 2026-11-06
+
+- **改名：`wist-console` → `wist-field-api`**（crate / 二进制 / 镜像同名）：
+  - 环境变量：`WIST_CONSOLE_CONFIG` → `WIST_FIELD_CONFIG`、`WIST_CONSOLE_SEC_FILE` → `WIST_FIELD_SEC_FILE`；
+  - 配置文件名：`console.toml` → `field-api.toml`（示例改为 `field-api.example.toml`）；
+  - 错误码前缀：`console_*` → `field_*`（`field_operator_missing` / `field_credential_*` /
+    `field_role_required` / `field_credential_store_unavailable` / `field_upstream_failed`）；
+  - ingress 操作员头：`x-console-operator` → `x-field-operator`。
+- **凭据侧一起改**：`cred.toml` 的 `audience` 改为 `wist-field-api`，栈侧密钥项
+  `SEC_CONSOLE_PEER_SETUP_CODE` → `SEC_FIELD_API_PEER_SETUP_CODE`。
+  ⚠ 这是一次**重新接入**：在 cred 里新建 `wist-field-api` 认证系统并签发新令牌，
+  旧的 `wist-console` 令牌与摘要全部失效（令牌需重发，不需要改代码）。
+- HTTP 接口路径与业务逻辑**零变更**。
+
 ## 0.5.0 · 2026-11-06
 
 - **新增 `GET /api/evidence/capabilities`**：把证据服务 `/healthz` 的 `objects.kind` 转成

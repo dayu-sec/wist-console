@@ -130,7 +130,7 @@ pub struct CredentialRuntime {
     listen: SocketAddr,
     /// 材料齐备时构建好的 mTLS 配置；`None` = 未初始化（等 `/__init` 写完材料）。
     tls: Option<rustls::ServerConfig>,
-    /// 进入 console 需要的角色（console 自己的决定，不来自 cred.toml）。
+    /// 进入本服务需要的角色（本服务自己的决定，不来自 cred.toml）。
     required_roles: Vec<String>,
     /// 收数 listener 是否还在跑。`spawn_listener` 置位，退出时清掉；
     /// 它挂了不会影响已登记的旧凭据，但「新凭据推不进来」必须能在页面上看到。
@@ -165,10 +165,10 @@ impl CredentialRuntime {
                 // 大半夜查「令牌突然全失效」时，`token_expired` 和 `invalid_token` 是两个故事。
                 // 摘要表读失败（磁盘 / 权限）不是「令牌不对」，不能让所有人去重新登录。
                 if matches!(err, wist_auth::credential::CredentialError::Store(_)) {
-                    log::error!("event=ConsoleCredentialStore code={} {err:?}", err.code());
+                    log::error!("event=FieldCredentialStore code={} {err:?}", err.code());
                     return Err(VerifyError::StoreUnavailable);
                 }
-                log::debug!("event=ConsoleCredentialRejected code={}", err.code());
+                log::debug!("event=FieldCredentialRejected code={}", err.code());
                 return Err(VerifyError::Invalid);
             }
         };
@@ -179,7 +179,7 @@ impl CredentialRuntime {
             .any(|role| self.required_roles.iter().any(|required| required == role))
         {
             log::warn!(
-                "event=ConsoleForbidden subject={} credential_id={} roles={:?} required={:?}",
+                "event=FieldForbidden subject={} credential_id={} roles={:?} required={:?}",
                 credential.subject,
                 credential.credential_id,
                 credential.roles,
@@ -197,7 +197,7 @@ impl CredentialRuntime {
         self.listen
     }
 
-    /// 进 console 需要的角色（登录端点的角色闸门用它）。
+    /// 进本服务需要的角色（登录端点的角色闸门用它）。
     pub fn required_roles(&self) -> &[String] {
         &self.required_roles
     }
@@ -279,7 +279,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         },
         (None, None) => {
             return Err(format!(
-                "{}: neither [identity] nor [init] is present — the console can neither serve \
+                "{}: neither [identity] nor [init] is present — the service can neither serve \
                  credentials nor register itself",
                 file.display()
             ));
@@ -389,7 +389,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
 
     let endpoint = match &cred.publish {
         Some(publish) => {
-            // 同样要展开：`https://${CONSOLE_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
+            // 同样要展开：`https://${FIELD_API_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
             // 不展开的后果很隐蔽 —— 占位符能当一个“主机名”用，证书真能签出来，
             // 直到 cred 拨号才失败（而且错在对方）。
             let expanded = crate::config::expand_secret(&publish.endpoint)?;
@@ -409,7 +409,7 @@ pub fn build(config: &CredentialsConfig) -> Result<CredentialRuntime, String> {
         .identity(identity)
         .publish_endpoint(endpoint);
     if let Some(init) = &cred.init {
-        // 信任锚：可能是 `${CONSOLE_CRED_CA_FILE}`，也可能没配（空串）。
+        // 信任锚：可能是 `${FIELD_API_CRED_CA_FILE}`，也可能没配（空串）。
         let ca_file = match &init.ca_file {
             Some(raw) => {
                 let expanded = crate::config::expand_secret(raw)?;
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn issuer_keys_are_one_per_line() {
         let dir = std::env::temp_dir().join(format!(
-            "wist-console-cred-{}-{}",
+            "wist-field-api-cred-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -630,7 +630,7 @@ mod tests {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "wist-console-cred-{tag}-{}-{}-{seq}",
+            "wist-field-api-cred-{tag}-{}-{}-{seq}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -643,7 +643,7 @@ mod tests {
 
     const VERIFY: &str = r#"
 [verify]
-audience = "wist-console"
+audience = "wist-field-api"
 allowed_issuers = ["wist-cred"]
 roles = ["read"]
 "#;
@@ -654,7 +654,7 @@ setup_code = "crp_test_setup_code"
 cred_url = "https://cred.internal:4444"
 
 [publish]
-endpoint = "https://console.internal:18802/api/v1/internal/credentials"
+endpoint = "https://field.internal:18802/api/v1/internal/credentials"
 "#;
 
     fn build_from(dir: &std::path::Path, body: &str) -> Result<CredentialRuntime, String> {
@@ -678,14 +678,14 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
         let mut params = rcgen::CertificateParams::default();
         params
             .distinguished_name
-            .push(rcgen::DnType::CommonName, "console.internal".to_string());
+            .push(rcgen::DnType::CommonName, "field.internal".to_string());
         let csr = params
             .serialize_request(&key)
             .expect("csr")
             .pem()
             .expect("csr pem");
         let issued = authority
-            .issue_server_certificate(&csr, &["console.internal".to_string()], 3600)
+            .issue_server_certificate(&csr, &["field.internal".to_string()], 3600)
             .expect("issue");
         std::fs::write(dir.join("server.crt"), &issued.certificate_pem).expect("cert");
         std::fs::write(dir.join("server.key"), key.serialize_pem()).expect("key");
@@ -750,7 +750,7 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
 
     #[test]
     fn a_publish_endpoint_without_a_host_is_a_startup_error() {
-        // 栈没渲染 CONSOLE_ADVERTISE_HOST 时就是 `https://:18802/…`：
+        // 栈没渲染 FIELD_API_ADVERTISE_HOST 时就是 `https://:18802/…`：
         // 这种地址签不出可用的证书，必须在启动期说出来，而不是等初始化页莫名其妙地失败。
         let dir = temp_dir("nohost");
         let error = build_from(
@@ -769,7 +769,7 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
     /// 放在 `[init]` 里写，不能“尾部追加”——那样会落到最后一个段里，被静默忽略。
     fn init_toml(insecure_tls: &str) -> String {
         format!(
-            "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\ninsecure_tls = {insecure_tls}\n\n[publish]\nendpoint = \"https://console.internal:18802/api/v1/internal/credentials\"\n"
+            "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\ninsecure_tls = {insecure_tls}\n\n[publish]\nendpoint = \"https://field.internal:18802/api/v1/internal/credentials\"\n"
         )
     }
 
@@ -780,7 +780,7 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
         let runtime = build_from(&dir, &init_toml("true")).expect("literal bool must parse");
         assert!(!runtime.is_initialized());
 
-        // 引号里的字符串（栈用 `"${CONSOLE_CRED_INSECURE_TLS}"`）
+        // 引号里的字符串（栈用 `"${FIELD_API_CRED_INSECURE_TLS}"`）
         build_from(&dir, &init_toml("\"false\"")).expect("quoted string must parse");
     }
 
@@ -800,7 +800,7 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
         let runtime = build_from(
             &dir,
             &format!(
-                "{VERIFY}require_signature = \"true\"\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://console.internal:18802/api/v1/internal/credentials\"\n"
+                "{VERIFY}require_signature = \"true\"\nissuer_public_key_file = \"issuer-signing.pub\"\n\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://field.internal:18802/api/v1/internal/credentials\"\n"
             ),
         )
         .expect("uninitialized service must still start (key arrives with the bundle)");
@@ -910,14 +910,14 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
 
     #[test]
     fn an_unresolved_publish_endpoint_is_a_startup_error() {
-        // 栈渲染的地址是 `https://${CONSOLE_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
+        // 栈渲染的地址是 `https://${FIELD_API_ADVERTISE_HOST}:${CREDENTIALS_HOST_PORT}/…`。
         // 变量没渲染时必须**当场**报：占位符能冒充一个主机名，证书真能签出来，
         // 错要等到 cred 拨号才暴露（而且错在对方）。
         let dir = temp_dir("endpointvar");
         let error = build_from(
             &dir,
             &format!(
-                "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://${{CONSOLE_ADVERTISE_HOST_UNSET}}:18802/api/v1/internal/credentials\"\n"
+                "{VERIFY}\n[init]\nsetup_code = \"crp_test_setup_code\"\n\n[publish]\nendpoint = \"https://${{FIELD_API_ADVERTISE_HOST_UNSET}}:18802/api/v1/internal/credentials\"\n"
             ),
         )
         .expect_err("must refuse");

@@ -1,11 +1,11 @@
-# wist-console
+# wist-field-api
 
 计算区运维台的 **BFF**。浏览器只跟它说话：到证据服务的 mTLS / 租户 / scope / 敏感度
 全在这里，页面不持有任何凭据。
 
-设计：`wist-design/doc/design/console/console-architecture.md`
-前端：[`wist-console-web`](https://github.com/dayu-sec/wist-console-web)
-部署：[`wist-console-stack`](https://github.com/dayu-sec/wist-console-stack)
+设计：`wist-design/doc/design/console/console-architecture.md`（历史路径，仓名已去掉 console）
+前端：[`wist-field-web`](https://github.com/dayu-sec/wist-field-web)（展示名「数据场 · 现场视图」）
+部署：[`wist-field-stack`](https://github.com/dayu-sec/wist-field-stack)
 
 ## 接口
 
@@ -82,17 +82,17 @@ GET  /api/metrics/agents/{agent_id}/history?window_seconds=&step_seconds=
 `auth.mode = "cred"`（默认）：请求带 `Authorization: Bearer wcr_…`，摘要由 `wist-cred` 通过
 mTLS 推到 `credentials.listen_addr`（默认 `3103`），BFF 用 `wist-cred-peer` 验；没有 token → 401，
 角色不够 → 403。
-`auth.mode = "ingress"`：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-console-operator` 里。
+`auth.mode = "ingress"`：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-field-operator` 里。
 **没有「不校验」这一档** —— 一个计算区界面不该默认谁都能进。
 
 ## 运行
 
 ```bash
-cargo run -- console.example.toml
-# 或 WIST_CONSOLE_CONFIG=/etc/wist-console/console.toml wist-console
+cargo run -- field-api.example.toml
+# 或 WIST_FIELD_CONFIG=/etc/wist-field-api/field-api.toml wist-field-api
 ```
 
-端口：容器内 `8080`（由 console-web 的 nginx 反代 `/api`）。
+端口：容器内 `8080`（由 field-web 的 nginx 反代 `/api`）。
 
 ## 构建
 
@@ -106,9 +106,9 @@ cargo clippy --all-targets -- -D warnings
 ```bash
 # Linux 开发机：先编原生二进制再打包
 cargo build --release --locked --target aarch64-unknown-linux-gnu
-mkdir -p docker/arm64 && cp target/aarch64-unknown-linux-gnu/release/wist-console docker/arm64/
-docker build -t wist-console:dev docker
+mkdir -p docker/arm64 && cp target/aarch64-unknown-linux-gnu/release/wist-field-api docker/arm64/
+docker build -t wist-field-api:dev docker
 ```
 
-日常直接用 CI 产物：`ghcr.io/dayu-sec/wist-console:v0.1.2-alpha`。
+日常直接用 CI 产物：`ghcr.io/dayu-sec/wist-field-api:v0.6.0-alpha`。
 镜像以 `10001:10001` 运行；挂进来的配置 0644，`sec-value.yml` 0640 且属主为 10001。

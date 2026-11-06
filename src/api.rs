@@ -36,7 +36,7 @@ pub fn router(state: AppState) -> Router {
         // 静态段优先于下面的 `/api/evidence/{artifact_id}`，不会把 artifact id 吃掉。
         .route("/api/evidence/capabilities", get(evidence_capabilities))
         .route("/api/integration", get(integration))
-        // 运行指标：读 console 栈自己那份 VictoriaMetrics（数据面镜像写进来的）。
+        // 运行指标：读计算区自己那份 VictoriaMetrics（数据面镜像写进来的）。
         // 概览 + 单台 agent 的趋势；两个都只读，不做跨栈聚合。
         .route("/api/metrics", get(metrics::overview))
         .route(
@@ -104,7 +104,7 @@ async fn require_initialized(
              still holds the certificate loaded at startup — re-register at /__init, then \
              RESTART this service so the new certificate is actually served"
         } else {
-            "this console has no cred materials yet: open /__init to register it"
+            "this service has no cred materials yet: open /__init to register it"
         };
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -390,7 +390,7 @@ async fn proxy_atlas(
         return error_response(
             StatusCode::NOT_FOUND,
             "atlas_not_configured",
-            "this console has no atlas.base_url configured",
+            "this service has no atlas.base_url configured",
         );
     };
     // 写端点与路径穿越都不放行：这里只代理 atlas 的公开读接口。
@@ -545,27 +545,27 @@ impl OperatorError {
         match self {
             Self::MissingHeader(header) => error_response(
                 StatusCode::UNAUTHORIZED,
-                "console_operator_missing",
+                "field_operator_missing",
                 format!("missing ingress operator header {header}"),
             ),
             Self::MissingCredential => error_response(
                 StatusCode::UNAUTHORIZED,
-                "console_credential_missing",
+                "field_credential_missing",
                 "missing access token: send `Authorization: Bearer <token>`",
             ),
             Self::InvalidCredential => error_response(
                 StatusCode::UNAUTHORIZED,
-                "console_credential_invalid",
-                "access token is not valid for this console",
+                "field_credential_invalid",
+                "access token is not valid for this service",
             ),
             Self::RoleRequired => error_response(
                 StatusCode::FORBIDDEN,
-                "console_role_required",
-                "access token is valid but does not grant console access",
+                "field_role_required",
+                "access token is valid but does not grant access",
             ),
             Self::StoreUnavailable => error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "console_credential_store_unavailable",
+                "field_credential_store_unavailable",
                 "credential store is unavailable; this is a server-side problem, not your token",
             ),
         }
@@ -615,7 +615,7 @@ fn passthrough_uncached(response: UpstreamResponse) -> Response {
 }
 
 fn upstream_failed(message: String) -> Response {
-    error_response(StatusCode::BAD_GATEWAY, "console_upstream_failed", message)
+    error_response(StatusCode::BAD_GATEWAY, "field_upstream_failed", message)
 }
 
 /// 没配地址的接口直接标 `not_configured`；这是「还没接」，不是故障。

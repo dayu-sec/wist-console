@@ -39,16 +39,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cp "target/${{ matrix.target }}/release/wist-console" artifacts/wist-console
-          cp console.example.toml artifacts/console.example.toml
-          tar -czf "wist-console-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
-            -C artifacts wist-console console.example.toml
-          ls -lh "wist-console-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          cp "target/${{ matrix.target }}/release/wist-field-api" artifacts/wist-field-api
+          cp field-api.example.toml artifacts/field-api.example.toml
+          tar -czf "wist-field-api-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
+            -C artifacts wist-field-api field-api.example.toml
+          ls -lh "wist-field-api-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wist-console-${{ matrix.target }}
-          path: wist-console-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          name: wist-field-api-${{ matrix.target }}
+          path: wist-field-api-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: wist-console-*-linux-gnu
+          pattern: wist-field-api-*-linux-gnu
           path: staged
           merge-multiple: true
 
@@ -73,8 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docker/amd64 docker/arm64
-          tar -xzf "staged/wist-console-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" -C docker/amd64
-          tar -xzf "staged/wist-console-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz" -C docker/arm64
+          tar -xzf "staged/wist-field-api-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz" -C docker/amd64
+          tar -xzf "staged/wist-field-api-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz" -C docker/arm64
           ls -R docker/amd64 docker/arm64
 
       - uses: docker/setup-qemu-action@v3
@@ -136,7 +136,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: wist-console-*
+          pattern: wist-field-api-*
           path: artifacts
           merge-multiple: true
 

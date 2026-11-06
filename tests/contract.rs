@@ -14,12 +14,12 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use wist_console::api::{self, AppState};
-use wist_console::config::{
+use wist_field_api::api::{self, AppState};
+use wist_field_api::config::{
     AtlasConfig, AuthConfig, AuthMode, Config, EvidenceConfig, IntegrationConfig, MetricsConfig,
     ServerConfig,
 };
-use wist_console::upstream::EvidenceClient;
+use wist_field_api::upstream::EvidenceClient;
 
 fn config(base_url: String, mode: AuthMode) -> Config {
     Config {
@@ -276,7 +276,7 @@ async fn missing_operator_header_is_401() {
         .unwrap();
     let (status, body) = call(&app, request).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert_eq!(body["error"]["code"], "console_operator_missing");
+    assert_eq!(body["error"]["code"], "field_operator_missing");
 }
 
 #[tokio::test]
@@ -290,7 +290,7 @@ async fn cred_mode_rejects_a_missing_bearer_token() {
     let (status, body) = call(&app, request).await;
     // 没有「不校验」这一档：cred 模式下没 token 就是 401，且原因与「token 不认识」分开。
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert_eq!(body["error"]["code"], "console_credential_missing");
+    assert_eq!(body["error"]["code"], "field_credential_missing");
 }
 
 #[tokio::test]
@@ -612,7 +612,7 @@ async fn atlas_reads_go_through_the_bff() {
 ///
 /// 这一条防的是"半可用现场"：页面能打开、接口永远 401，运维只能猜。
 #[tokio::test]
-async fn an_uninitialized_console_serves_only_the_init_page() {
+async fn an_uninitialized_service_serves_only_the_init_page() {
     let dir = std::env::temp_dir().join(format!(
         "wist-console-init-{}-{}-{}",
         std::process::id(),
@@ -645,7 +645,7 @@ endpoint = "https://console.internal:18802/api/v1/internal/credentials"
     )
     .expect("cred.toml");
 
-    let runtime = wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+    let runtime = wist_field_api::credentials::build(&wist_field_api::config::CredentialsConfig {
         file: cred_file,
         listen_addr: "127.0.0.1:0".to_string(),
         store_path: dir.join("credentials.json"),
@@ -773,7 +773,7 @@ roles = ["read"]
     .expect("cred.toml");
 
     let runtime = Arc::new(
-        wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+        wist_field_api::credentials::build(&wist_field_api::config::CredentialsConfig {
             file: cred_file,
             listen_addr: "127.0.0.1:0".to_string(),
             store_path: dir.join("credentials.json"),
@@ -870,7 +870,7 @@ roles = ["read"]
     .expect("cred.toml");
 
     let runtime = Arc::new(
-        wist_console::credentials::build(&wist_console::config::CredentialsConfig {
+        wist_field_api::credentials::build(&wist_field_api::config::CredentialsConfig {
             file: cred_file,
             listen_addr: "127.0.0.1:0".to_string(),
             store_path: dir.join("credentials.json"),
@@ -884,7 +884,7 @@ roles = ["read"]
     app_state.credentials = Some(runtime);
     let app = api::router(app_state);
 
-    // 没带令牌 → 401 credential_missing（不是“console_credential_*”：这是登录端点，
+    // 没带令牌 → 401 credential_missing（不是“field_credential_*”：这是登录端点，
     // 契约由 cred-peer 统一，中心/ingest 接入时同一个语义）。
     let (status, body) = call(
         &app,
@@ -916,7 +916,7 @@ roles = ["read"]
 }
 
 #[tokio::test]
-async fn metrics_page_reads_the_console_victoria_metrics() {
+async fn metrics_page_reads_the_compute_zone_victoria_metrics() {
     let base = spawn_stub().await;
     let mut cfg = config(base.clone(), AuthMode::Ingress);
     cfg.metrics = Some(MetricsConfig {

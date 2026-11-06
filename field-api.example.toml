@@ -1,6 +1,6 @@
-# wist-console 示例配置（本地联调口径）
+# wist-field-api 示例配置（本地联调口径）
 #
-# 生产由 `wist-console-stack` 渲染；密钥只放 `${SEC_...}`，不写在这里。
+# 生产由 `wist-field-stack` 渲染；密钥只放 `${SEC_...}`，不写在这里。
 
 [server]
 listen_addr = "127.0.0.1:19200"
@@ -8,10 +8,10 @@ listen_addr = "127.0.0.1:19200"
 [auth]
 # cred（默认）：`Authorization: Bearer wcr_…`，摘要由 `wist-cred` 通过 mTLS 推过来
 #                    （见下面的 `[credentials]`）。
-# ingress：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-console-operator` 里。
+# ingress：交给入口（VPN / 堡垒机 / 反代）认证，再把操作员写在 `x-field-operator` 里。
 # **没有「不校验」这一档。**
 mode = "cred"
-operator_header = "x-console-operator"
+operator_header = "x-field-operator"
 
 [credentials]
 # 接入命令落的 `cred.toml`（identity + verify 两段），本服务只认这个文件。

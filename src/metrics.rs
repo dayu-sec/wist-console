@@ -1,4 +1,4 @@
-//! 运行指标：读 console 栈**自己那份** VictoriaMetrics。
+//! 运行指标：读计算区**自己那份** VictoriaMetrics。
 //!
 //! 数据面（wparse）把 agent 采集指标镜像进来（网关栈的 `CONSOLE_VM_ENDPOINT`），
 //! 网关栈那份 VM 只服务控制面观测页 —— 两份存储互不聚合（谁写谁查）。
@@ -144,7 +144,7 @@ fn not_configured() -> Response {
     error_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "metrics_not_configured",
-        "未配置 metrics.base_url（console.toml 的 [metrics] 段）：这个计算区还没有指标存储",
+        "未配置 metrics.base_url（field-api.toml 的 [metrics] 段）：这个计算区还没有指标存储",
     )
 }
 
@@ -153,7 +153,7 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
         "{{__name__=~\"{}\"}}",
         agent_metric::ALL_SELF_METRICS.join("|")
     );
-    // 目录与「每台 agent 有多少序列」都是一次全量计数：console 的 VM 只收数据面镜像，
+    // 目录与「每台 agent 有多少序列」都是一次全量计数：计算区的 VM 只收数据面镜像，
     // 规模是「几百到几千条序列」，与网关栈那份相比更小，不做额外分页。
     let catalog_expr = "count by (__name__) ({__name__=~\".+\"})".to_string();
     let per_agent_expr = format!("count by ({}) ({{__name__=~\".+\"}})", label::AGENT);
