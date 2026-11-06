@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.5.0 · 2026-11-06
+
+- **新增 `GET /api/evidence/capabilities`**：把证据服务 `/healthz` 的 `objects.kind` 转成
+  页面能用的形状 `{ objects_kind, presign_supported }`。
+- `presign_supported = false`（`objects.kind = file`）时，证据页「打开正文」直接走 BFF
+  代理读（`/api/evidence/{id}/content`），不再先发一个必然 501 的签名请求。
+- 证据服务不报 `objects`（老实例）/ 探测失败时回 `objects_kind: null` +
+  `presign_supported: true`，页面保持「先试签名、失败再回落」。
+
 ## 0.4.0 · 2026-11-06
 
 - **新增运行指标读接口**：`GET /api/metrics`（存储里有什么、谁在报、即时值）与
