@@ -44,7 +44,8 @@ GET  /api/integration
          warp_parse: { connector, sink_group, env } }
 
 GET  /api/metrics
-     → { generated_at_ms, window_seconds, source, totals, agents: [...], catalog: [...] }
+     → { generated_at_ms, window_seconds, source, totals,
+         business: [...], unassigned_agents: [...], agents: [...], catalog: [...] }
      读的是**本栈** VictoriaMetrics（数据面把 agent 采集指标镜像进来），不是网关栈那份。
 
 GET  /api/metrics/agents/{agent_id}/history?window_seconds=&step_seconds=
@@ -71,11 +72,45 @@ GET  /api/metrics/agents/{agent_id}/history?window_seconds=&step_seconds=
 
 - 网关栈那份：`WPARSE_VM_ENDPOINT`，给控制面观测页，含引擎 / 管道统计（`wparse_*`）；
 - 本栈那份（`[metrics] base_url`）：数据面用 `CONSOLE_VM_ENDPOINT` 把 **同一批 agent 采集指标**
-  再写一份，给星象台的「运行指标」页。
+  再写一份，给数据场（`wist-field-web`）的「运行指标」页。
 
 所以本栈的序列数少于网关栈是正常的 —— 差值正是只写网关栈的引擎统计。指标名 / label 键 /
 单位换算全部取自 `wist-metrics` 的 `names` 常量表，读侧不再手写名字（历史上曾因此整页空白）。
 没配 `[metrics]` 时这一域回 `503 metrics_not_configured`（「没接入」，不是故障）。
+
+### 四层表达
+
+页面按四层看这一片的「强度」，BFF 只负责第 1 层的聚合：
+
+| 层 | 数据来源 | 说明 |
+| --- | --- | --- |
+| 1 业务层 | `field-api.toml` 的 `[[business.units]]` | 主机集合 → 命名的逻辑单元 |
+| 2 服务层 | 指标的 `app` label | `app` 表达**用途**；同一用途可落在多台主机 |
+| 3 中间件层 | `container_*` / `kafka_*` | 有契约，等 agentd 开 provider |
+| 4 计算资源层 | `system_*` / `process_*` | 宿主侧资源 |
+
+**业务单元 ≠ `app`**：`app` 是用途（这台机器上跑什么），业务单元是归属（这台机器的开销算到
+哪条业务上）。归属关系只存在于配置里，**不下沉到数据面** —— agentd / wparse 的 label 契约
+不动，改归属不用重启数据面，也不需要 `tenant_id` / `biz` label。
+
+```toml
+[[business.units]]
+id    = "billing"          # 必填且唯一
+name  = "计费服务"          # 留空时退回 id
+agents = ["agent-host-a55a338d7723"]   # 指标里的 `agent` label
+```
+
+规则与口径：
+
+- 一台主机**只能属于一个业务**（跨业务共用会让投入重复计账，启动时直接报错）；
+- 不在任何业务里的主机列在 `unassigned_agents`，不默默漏掉；
+- 内存 / 进程 / 采集目标数 / 核数**求和**；负载与磁盘 / 挂载点使用率取**峰值** —— 后两者
+  本来就是单机口径，相加没有意义；
+- 配置里有、存储里没有的主机（离线 / 从没接入 / id 写错）放在 `agents_missing`。
+
+口径注意：`agent_cpu_ratio` 是**瞬时比例**，算投入（core·小时）要先在 VM 里
+`sum by (agent) (rate(system_cpu_seconds_total{mode!="idle"}[5m]))` 再按业务相加，
+不能用这一层给的瞬时值乘时间。
 
 ## 入口身份
 
