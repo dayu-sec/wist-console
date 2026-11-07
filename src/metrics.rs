@@ -18,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wist_metrics::names::{agent as agent_metric, label, ratio_to_percent, seconds_to_millis};
+use wist_metrics::spec::METRIC_SPECS;
 
 use crate::api::{AppState, authorize, error_response, now_ms};
 
@@ -42,6 +43,32 @@ const SELECTION_LABELS: &[&str] = &[
     "env", "cluster", "app", "role", "shard", "tier", "region", "zone",
 ];
 
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct HostMetrics {
+    pub hostname: Option<String>,
+    pub ip_addresses: Vec<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub kernel: Option<String>,
+    pub load_1m: Option<f64>,
+    pub load_5m: Option<f64>,
+    pub load_15m: Option<f64>,
+    pub memory_total_bytes: Option<f64>,
+    pub memory_available_bytes: Option<f64>,
+    /// 已换算成百分比（VM 里存的是 0~1 的 ratio）。
+    pub memory_usage_percent: Option<f64>,
+    /// 系统盘（`disk_role=system`）使用率，百分比。
+    pub disk_usage_percent: Option<f64>,
+    pub disk_total_bytes: Option<f64>,
+    pub disk_available_bytes: Option<f64>,
+    /// 最紧张的挂载点（可能不是系统盘根分区），百分比。
+    pub filesystem_usage_percent: Option<f64>,
+    pub filesystem_mount: Option<String>,
+    pub uptime_seconds: Option<f64>,
+    /// 采集到的进程数（`process_pid` 的序列数）。
+    pub processes: Option<f64>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct AgentRow {
     pub agent_id: String,
@@ -60,6 +87,9 @@ pub struct AgentRow {
     pub collect_dropped: Option<f64>,
     pub uplink_failed_total: Option<f64>,
     pub discovery_policy_version: Option<f64>,
+    /// 主机侧（`system_*` / `process_*`）：**宿主**的资源，不是 agent 进程自己的。
+    /// 老 agentd 只报自观测时这里会是空值，页面显示「—」。
+    pub host: HostMetrics,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,11 +178,54 @@ fn not_configured() -> Response {
     )
 }
 
+/// 主机侧要展示的 fact（**用 fact_key 查 spec 表**，不手写指标名）。
+/// `host.disk.*` 与 `host.filesystem.*` 不在同一个维度上：前者是整盘汇总，后者逐挂载点。
+const HOST_FACTS: &[&str] = &[
+    "host.info",
+    "host.loadavg.1m",
+    "host.loadavg.5m",
+    "host.loadavg.15m",
+    "host.memory.total_bytes",
+    "host.memory.available_bytes",
+    "host.memory.usage_ratio",
+    "host.disk.system.usage_ratio",
+    "host.disk.system.total_bytes",
+    "host.disk.system.available_bytes",
+    "host.filesystem.usage_ratio",
+    "host.uptime.seconds",
+    "process.pid",
+];
+
+fn spec_name(fact_key: &str) -> Option<&'static str> {
+    METRIC_SPECS
+        .iter()
+        .find(|spec| spec.fact_key == fact_key)
+        .map(|spec| spec.name)
+}
+
+/// 指标名 → fact_key 的反查（解析查询结果时用，避免在匹配分支里写死名字）。
+fn fact_key(name: &str) -> Option<&'static str> {
+    METRIC_SPECS
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| spec.fact_key)
+}
+
+fn names_for(facts: &[&str]) -> String {
+    facts
+        .iter()
+        .filter_map(|fact| spec_name(fact))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Value, String> {
     let self_metrics = format!(
         "{{__name__=~\"{}\"}}",
         agent_metric::ALL_SELF_METRICS.join("|")
     );
+    // 主机侧单独一条查询：`system_*` / `process_*` 与 agent 自观测是两套序列。
+    let host_metrics = format!("{{__name__=~\"{}\"}}", names_for(HOST_FACTS));
     // 目录与「每台 agent 有多少序列」都是一次全量计数：计算区的 VM 只收数据面镜像，
     // 规模是「几百到几千条序列」，与网关栈那份相比更小，不做额外分页。
     let catalog_expr = "count by (__name__) ({__name__=~\".+\"})".to_string();
@@ -165,16 +238,18 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
     );
 
     // 四个查询并发：页面的四块信息互不依赖，串行只会把首页拖慢四倍。
-    let (catalog, per_agent, values, samples) = tokio::join!(
+    let (catalog, per_agent, values, host_values, samples) = tokio::join!(
         query(http, base_url, &catalog_expr),
         query(http, base_url, &per_agent_expr),
         query(http, base_url, &self_metrics),
+        query(http, base_url, &host_metrics),
         query(http, base_url, &samples_expr),
     );
     // 任一失败就整页失败：半页数据比一句明确的报错更容易误导人。
     let mut catalog = catalog?;
     let per_agent = per_agent?;
     let values = values?;
+    let host_values = host_values?;
     let samples = samples?;
 
     let mut entries: Vec<CatalogEntry> = catalog
@@ -254,6 +329,88 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
         }
     }
 
+    // 主机侧（`system_*` / `process_*`）：按 fact_key 反查后再分支，不在代码里写指标名。
+    for item in &host_values {
+        let metric = &item["metric"];
+        let Some(agent_id) = metric[label::AGENT].as_str() else {
+            continue;
+        };
+        let name = metric["__name__"].as_str().unwrap_or_default();
+        let value = scalar(item);
+        let row = agents.entry(agent_id.to_string()).or_default();
+        row.agent_id = agent_id.to_string();
+        match fact_key(name) {
+            Some("host.info") => {
+                if let Some(found) = metric.get(label::HOST_NAME).and_then(Value::as_str) {
+                    row.host.hostname = Some(found.to_string());
+                }
+                if let Some(found) = metric.get(label::HOST_IP).and_then(Value::as_str)
+                    && !row.host.ip_addresses.iter().any(|ip| ip == found)
+                {
+                    row.host.ip_addresses.push(found.to_string());
+                }
+                row.host.os = metric
+                    .get(label::OS)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(row.host.os.clone());
+                row.host.arch = metric
+                    .get(label::ARCH)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(row.host.arch.clone());
+                row.host.kernel = metric
+                    .get(label::KERNEL)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(row.host.kernel.clone());
+            }
+            Some("host.loadavg.1m") => row.host.load_1m = value,
+            Some("host.loadavg.5m") => row.host.load_5m = value,
+            Some("host.loadavg.15m") => row.host.load_15m = value,
+            Some("host.memory.total_bytes") => row.host.memory_total_bytes = value,
+            Some("host.memory.available_bytes") => row.host.memory_available_bytes = value,
+            Some("host.memory.usage_ratio") => {
+                row.host.memory_usage_percent = value.map(ratio_to_percent)
+            }
+            Some("host.disk.system.usage_ratio") => {
+                // `system_disk_usage_ratio` 按 `disk_role` 分两条序列（system / data）。
+                if metric.get(label::DISK_ROLE).and_then(Value::as_str) == Some("system") {
+                    row.host.disk_usage_percent = value.map(ratio_to_percent);
+                }
+            }
+            Some("host.disk.system.total_bytes") => {
+                if metric.get(label::DISK_ROLE).and_then(Value::as_str) == Some("system") {
+                    row.host.disk_total_bytes = value;
+                }
+            }
+            Some("host.disk.system.available_bytes") => {
+                if metric.get(label::DISK_ROLE).and_then(Value::as_str) == Some("system") {
+                    row.host.disk_available_bytes = value;
+                }
+            }
+            Some("host.filesystem.usage_ratio") => {
+                // 逐挂载点：只留最紧张的那个（页面一行装不下全部）。
+                if let Some(ratio) = value
+                    && let Some(mount) = metric.get(label::MOUNTPOINT).and_then(Value::as_str)
+                {
+                    let percent = ratio_to_percent(ratio);
+                    if row
+                        .host
+                        .filesystem_usage_percent
+                        .is_none_or(|current| percent > current)
+                    {
+                        row.host.filesystem_usage_percent = Some(percent);
+                        row.host.filesystem_mount = Some(mount.to_string());
+                    }
+                }
+            }
+            Some("host.uptime.seconds") => row.host.uptime_seconds = value,
+            Some("process.pid") => *row.host.processes.get_or_insert(0.0) += 1.0,
+            _ => {}
+        }
+    }
+
     Ok(json!({
         "generated_at_ms": now_ms(),
         "window_seconds": SAMPLE_WINDOW_SECONDS,
@@ -268,6 +425,10 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
     }))
 }
 
+/// 趋势图的一行：(fact_key 或指标名, 标题, 单位, 换算)。
+/// 抽出来是为了过 clippy 的 `type_complexity`。
+type SeriesPlan = (&'static str, &'static str, &'static str, fn(f64) -> f64);
+
 async fn collect_history(
     http: &reqwest::Client,
     base_url: &str,
@@ -281,55 +442,118 @@ async fn collect_history(
         escape_promql(agent_id),
         agent_metric::HISTORY.join("|")
     );
-    let result = query_range(http, base_url, &expr, window, step).await?;
+    // 主机侧要 `max by (__name__)`：挂载点会展开成多条序列，图上只要一条（最紧张的那个）。
+    // 磁盘带 `disk_role=system` 过滤，挂载点则没这个 label，所以拆两条。
+    let agent = escape_promql(agent_id);
+    let host_load_mem = format!(
+        "max by (__name__) ({{{}=\"{}\", __name__=~\"{}\"}})",
+        label::AGENT,
+        agent,
+        names_for(&["host.loadavg.1m", "host.memory.usage_ratio"])
+    );
+    let host_disk = format!(
+        "max by (__name__) ({{{}=\"{}\", __name__=~\"{}\", {}=\"system\"}})",
+        label::AGENT,
+        agent,
+        names_for(&["host.disk.system.usage_ratio"]),
+        label::DISK_ROLE
+    );
+    let host_filesystem = format!(
+        "max by (__name__) ({{{}=\"{}\", __name__=~\"{}\"}})",
+        label::AGENT,
+        agent,
+        names_for(&["host.filesystem.usage_ratio"])
+    );
+    let (self_result, load_mem, disk, filesystem) = tokio::join!(
+        query_range(http, base_url, &expr, window, step),
+        query_range(http, base_url, &host_load_mem, window, step),
+        query_range(http, base_url, &host_disk, window, step),
+        query_range(http, base_url, &host_filesystem, window, step),
+    );
 
     let mut labels = BTreeMap::new();
     let mut by_name: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
-    for item in &result {
-        let metric = &item["metric"];
-        if labels.is_empty() {
-            for key in SELECTION_LABELS {
-                if let Some(found) = metric.get(*key).and_then(Value::as_str) {
-                    labels.insert((*key).to_string(), found.to_string());
+    for result in [self_result?, load_mem?, disk?, filesystem?] {
+        for item in &result {
+            let metric = &item["metric"];
+            if labels.is_empty() {
+                for key in SELECTION_LABELS {
+                    if let Some(found) = metric.get(*key).and_then(Value::as_str) {
+                        labels.insert((*key).to_string(), found.to_string());
+                    }
                 }
             }
+            let Some(name) = metric["__name__"].as_str() else {
+                continue;
+            };
+            by_name.insert(name.to_string(), points(item));
         }
-        let Some(name) = metric["__name__"].as_str() else {
-            continue;
-        };
-        by_name.insert(name.to_string(), points(item));
     }
 
-    // 顺序跟常量表走：页面横排四张图，顺序稳定比「按名字排序」更好认。
-    let series = agent_metric::HISTORY
-        .iter()
-        .filter_map(|name| {
-            let points = by_name.remove(*name).unwrap_or_default();
-            if points.is_empty() {
-                return None;
-            }
-            let (title, unit, convert): (&'static str, &'static str, fn(f64) -> f64) = match *name {
-                agent_metric::CPU_RATIO => ("CPU（单核比例换算）", "percent", ratio_to_percent),
-                agent_metric::MEMORY_BYTES => ("常驻内存", "bytes", |value| value),
-                agent_metric::CPU_CORES => ("逻辑核数", "count", |value| value),
-                agent_metric::ADMIN_LATENCY_SECONDS => {
-                    ("管理面往返时延", "milliseconds", |value| {
-                        seconds_to_millis(value) as f64
-                    })
-                }
-                _ => return None,
-            };
-            Some(HistorySeries {
-                metric: (*name).to_string(),
-                title,
-                unit,
-                points: points
-                    .into_iter()
-                    .map(|(at, value)| (at, convert(value)))
-                    .collect(),
-            })
-        })
-        .collect();
+    // 先主机（页面就是为它加的），再 agent 自观测；每张图的名称/单位/换算出后端定。
+    let plan: Vec<SeriesPlan> = vec![
+        ("host.loadavg.1m", "1 分钟负载", "count", |value| value),
+        (
+            "host.memory.usage_ratio",
+            "主机内存使用率",
+            "percent",
+            ratio_to_percent,
+        ),
+        (
+            "host.disk.system.usage_ratio",
+            "系统盘使用率",
+            "percent",
+            ratio_to_percent,
+        ),
+        (
+            "host.filesystem.usage_ratio",
+            "最紧张挂载点使用率",
+            "percent",
+            ratio_to_percent,
+        ),
+        (
+            agent_metric::MEMORY_BYTES,
+            "Agent 常驻内存",
+            "bytes",
+            |value| value,
+        ),
+        (
+            agent_metric::CPU_RATIO,
+            "Agent CPU（单核比例换算）",
+            "percent",
+            ratio_to_percent,
+        ),
+        (
+            agent_metric::CPU_CORES,
+            "Agent 逻辑核数",
+            "count",
+            |value| value,
+        ),
+        (
+            agent_metric::ADMIN_LATENCY_SECONDS,
+            "管理面往返时延",
+            "milliseconds",
+            |value| seconds_to_millis(value) as f64,
+        ),
+    ];
+    let mut series = Vec::new();
+    for (key, title, unit, convert) in plan {
+        // 前四项是 fact_key（主机侧），后四项直接是指标名（agent 自观测）。
+        let name = spec_name(key).unwrap_or(key);
+        let points = by_name.remove(name).unwrap_or_default();
+        if points.is_empty() {
+            continue;
+        }
+        series.push(HistorySeries {
+            metric: name.to_string(),
+            title,
+            unit,
+            points: points
+                .into_iter()
+                .map(|(at, value)| (at, convert(value)))
+                .collect(),
+        });
+    }
 
     Ok(AgentHistory {
         agent_id: agent_id.to_string(),
@@ -452,6 +676,20 @@ fn escape_promql(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 主机侧的 fact_key 必须都能在 `wist-metrics` 的 spec 表里解析出指标名。
+    /// 改名/删 spec 时这里先红，而不是页面上静默少几列。
+    #[test]
+    fn every_host_fact_resolves_to_a_metric_name() {
+        for fact in HOST_FACTS {
+            assert!(spec_name(fact).is_some(), "{fact} 不在 METRIC_SPECS 里");
+        }
+        // 反查也要能回来（解析查询结果时靠它分支）。
+        for fact in HOST_FACTS {
+            let name = spec_name(fact).expect("resolved");
+            assert_eq!(fact_key(name), Some(*fact), "{fact} → {name} 反查不一致");
+        }
+    }
 
     #[test]
     fn window_and_step_are_clamped() {
