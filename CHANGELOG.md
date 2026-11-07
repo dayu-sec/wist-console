@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.6.2 · 2026-11-07
+
+- **TCR 推送从发版路径里拆出去**：`release.yml` 只推 ghcr（约 2 分钟出 tag + 多架构镜像），
+  新增 `release-tcr.yml` 在同一 tag 上独立跑 TCR 同步。
+- 起因：TCR 在腾讯云，从 GitHub runner 上传实测要 8~10 分钟（偶发 TLS 握手超时），
+  把「推 tag → 镜像可用」从 2 分钟拖到 10 分钟以上；失败还会连累整条 Release。
+- 现在 TCR 同步有独立 run，失败只重跑它，不影响已发布的 ghcr 镜像与 GitHub Release。
+- **镜像内容与行为零变化**。
+
 ## 0.6.1 · 2026-11-06
 
 - **发布流水线：原生分架构构建镜像，去掉 QEMU**（与 `wist-center` 同一套）：

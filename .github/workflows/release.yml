@@ -57,9 +57,9 @@ jobs:
   #   之前用 `platforms: linux/amd64,linux/arm64` 一次构建时，arm64 那一段在 amd64 runner
   #   上模拟执行，镜像里的 `apt-get` 要跑 8–10 分钟（实测整个 `Build and push` 33 分钟）。
   #
-  #   每个架构对 ghcr / TCR **各推一次**（push-by-digest）：buildx 的 `type=image` 不接受
-  #   多个 `name=` + `push-by-digest`（实测只推最后一个），所以不能靠一次构建双推。
-  #   manifest 阶段只在各自仓库内建 index —— 不做 ghcr → TCR 的跨仓库搬层。
+  #   **本工作流只推 ghcr**：TCR 在腾讯云，从 GitHub runner 上传经常要 8~10 分钟，
+  #   把它留在这里会把「tag → 可用镜像」拖长一个数量级。TCR 同步在 `release-tcr.yml`
+  #   里独立跑（同一个 tag 触发，单独一个 run，失败可以单独重跑，不阻塞发版）。
   docker-amd64:
     name: Docker image (linux/amd64)
     needs: [build-binaries]
@@ -92,16 +92,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 国内镜像源（腾讯云 TCR）：国内服务器拉 ghcr.io 很慢，客户端改用 TCR 地址。
-      # 凭据在 TCR 控制台生成（访问凭证，需 push 权限），存 GitHub Secrets：
-      # TCR_USERNAME / TCR_PASSWORD。新仓名首次推送时由 TCR 自动建仓。
-      - name: Login to TCR
-        uses: docker/login-action@v4
-        with:
-          registry: dy-sec.tencentcloudcr.com
-          username: ${{ secrets.TCR_USERNAME }}
-          password: ${{ secrets.TCR_PASSWORD }}
-
       - name: Build and push to ghcr by digest
         id: ghcr
         uses: docker/build-push-action@v7
@@ -112,24 +102,13 @@ jobs:
           cache-from: type=gha,scope=field-api-amd64
           cache-to: type=gha,mode=max,scope=field-api-amd64
 
-      - name: Build and push to TCR by digest
-        id: tcr
-        uses: docker/build-push-action@v7
-        with:
-          context: docker
-          platforms: linux/amd64
-          outputs: type=image,name=dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }},push-by-digest=true,push=true
-          cache-from: type=gha,scope=field-api-amd64
-
-      - name: Export digests
+      - name: Export digest
         run: |
           set -euo pipefail
           mkdir -p /tmp/digests
           ghcr="${{ steps.ghcr.outputs.digest }}"
-          tcr="${{ steps.tcr.outputs.digest }}"
-          [ -n "${ghcr}" ] && [ -n "${tcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
+          [ -n "${ghcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
           printf '%s' "${ghcr#sha256:}" > /tmp/digests/ghcr-amd64
-          printf '%s' "${tcr#sha256:}" > /tmp/digests/tcr-amd64
 
       - uses: actions/upload-artifact@v7
         with:
@@ -170,13 +149,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to TCR
-        uses: docker/login-action@v4
-        with:
-          registry: dy-sec.tencentcloudcr.com
-          username: ${{ secrets.TCR_USERNAME }}
-          password: ${{ secrets.TCR_PASSWORD }}
-
       - name: Build and push to ghcr by digest
         id: ghcr
         uses: docker/build-push-action@v7
@@ -187,24 +159,13 @@ jobs:
           cache-from: type=gha,scope=field-api-arm64
           cache-to: type=gha,mode=max,scope=field-api-arm64
 
-      - name: Build and push to TCR by digest
-        id: tcr
-        uses: docker/build-push-action@v7
-        with:
-          context: docker
-          platforms: linux/arm64
-          outputs: type=image,name=dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }},push-by-digest=true,push=true
-          cache-from: type=gha,scope=field-api-arm64
-
-      - name: Export digests
+      - name: Export digest
         run: |
           set -euo pipefail
           mkdir -p /tmp/digests
           ghcr="${{ steps.ghcr.outputs.digest }}"
-          tcr="${{ steps.tcr.outputs.digest }}"
-          [ -n "${ghcr}" ] && [ -n "${tcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
+          [ -n "${ghcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
           printf '%s' "${ghcr#sha256:}" > /tmp/digests/ghcr-arm64
-          printf '%s' "${tcr#sha256:}" > /tmp/digests/tcr-arm64
 
       - uses: actions/upload-artifact@v7
         with:
@@ -213,8 +174,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # 2c. 合并两个架构的 digest → 多架构 manifest。
-  #     每个仓库用它**自己**的 per-arch digest 作源建 index（只写 manifest，不搬层）。
+  # 2c. 合并两个架构的 digest → 多架构 manifest（只写 manifest，不搬层）。
   docker-manifest:
     name: Compose multi-arch manifest
     needs: [docker-amd64, docker-arm64]
@@ -240,48 +200,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to TCR
-        uses: docker/login-action@v4
-        with:
-          registry: dy-sec.tencentcloudcr.com
-          username: ${{ secrets.TCR_USERNAME }}
-          password: ${{ secrets.TCR_PASSWORD }}
-
       - name: Compute image tags
         id: meta
         run: |
-          # 预发布 tag 只推该 tag，**不覆盖 :latest**。两个源同进退。
+          # 预发布 tag 只推该 tag，**不覆盖 :latest**。
           ghcr="ghcr.io/${{ github.repository }}"
-          tcr="dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}"
           ghcr_tags="${ghcr}:${{ github.ref_name }}"
-          tcr_tags="${tcr}:${{ github.ref_name }}"
           case "${{ github.ref_name }}" in
-            *-*)
-              ;;
-            *)
-              ghcr_tags="$(printf '%s\n%s' "$ghcr_tags" "$ghcr:latest")"
-              tcr_tags="$(printf '%s\n%s' "$tcr_tags" "$tcr:latest")"
-              ;;
+            *-*) ;;
+            *) ghcr_tags="$(printf '%s\n%s' "$ghcr_tags" "$ghcr:latest")" ;;
           esac
-          {
-            printf 'ghcr_tags<<__EOF__\n%s\n__EOF__\n' "$ghcr_tags"
-            printf 'tcr_tags<<__EOF__\n%s\n__EOF__\n' "$tcr_tags"
-          } >> "$GITHUB_OUTPUT"
+          printf 'ghcr_tags<<__EOF__\n%s\n__EOF__\n' "$ghcr_tags" >> "$GITHUB_OUTPUT"
 
-      # 前置检查：每个仓库的 per-arch digest 必须真在那里。缺一边就快速失败。
       - name: Verify per-arch digests
         run: |
           set -euo pipefail
           ghcr="ghcr.io/${{ github.repository }}"
-          tcr="dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}"
           for f in /tmp/digests/ghcr-*; do
             docker buildx imagetools inspect "${ghcr}@sha256:$(cat "$f")" > /dev/null
           done
-          for f in /tmp/digests/tcr-*; do
-            docker buildx imagetools inspect "${tcr}@sha256:$(cat "$f")" > /dev/null
-          done
           [ "$(find /tmp/digests -name 'ghcr-*' | wc -l | tr -d ' ')" -eq 2 ] || { echo "::error::期望 2 个 ghcr digest"; exit 1; }
-          [ "$(find /tmp/digests -name 'tcr-*' | wc -l | tr -d ' ')" -eq 2 ] || { echo "::error::期望 2 个 TCR digest"; exit 1; }
 
       - name: Create ghcr multi-arch manifest
         env:
@@ -295,24 +233,6 @@ jobs:
           sources=()
           for f in /tmp/digests/ghcr-*; do
             sources+=("ghcr.io/${{ github.repository }}@sha256:$(cat "$f")")
-          done
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && docker buildx imagetools inspect "$tag"
-          done <<< "$TAGS"
-
-      - name: Create TCR multi-arch manifest
-        env:
-          TAGS: ${{ steps.meta.outputs.tcr_tags }}
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(-t "$tag")
-          done <<< "$TAGS"
-          sources=()
-          for f in /tmp/digests/tcr-*; do
-            sources+=("dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}@sha256:$(cat "$f")")
           done
           docker buildx imagetools create "${args[@]}" "${sources[@]}"
           while IFS= read -r tag; do
@@ -343,3 +263,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
           generate_release_notes: true
           files: artifacts/*.tar.gz
+
+# 本工作流只出 ghcr 镜像 + GitHub Release 资产（约 2 分钟）。
+# TCR 是可选镜像源（国内站点用），由 `release-tcr.yml` 在同一 tag 上独立跑：
+# 它慢（跨境上传 8~10 分钟）、可能因网络抖动失败，但这些都不该拖住发版。

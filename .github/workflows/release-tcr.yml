@@ -1,0 +1,215 @@
+name: Sync TCR
+
+# 把同一个 tag 的镜像同步到腾讯云 TCR（国内站点的镜像源）。
+#
+# 为什么单独一个工作流（而不是塞进 Release）：
+#   - TCR 在腾讯云，从 GitHub 托管 runner 上传经常要 8~10 分钟，偶尔 TLS 握手超时；
+#   - 留在 Release 里会把「推 tag → 镜像可用」从 2 分钟拖到 10 分钟以上；
+#   - 拆出来以后它有自己的 run，失败重跑只重跑它，不重编二进制、不重发 Release。
+#
+# 实现上**重新构建**（而不是从 ghcr 搬层）：跨仓库搬层（imagetools 指向另一个仓库的 blob）
+# 曾在其他仓卡死 30+ 分钟；这里按原生产物直推 TCR，路径最短。二进制与 Release 工作流同源，
+# 都是同一个 tag 的仓库内容。
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  # 网络抖动导致失败时：在这个工作流的 run 页面点 "Re-run failed jobs" 即可，或手动派发。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一个 tag 只允许一个同步流程，避免手动重跑与自动触发叠加。
+concurrency:
+  group: tcr-sync-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  tcr-amd64:
+    name: TCR (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cargo build
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Stage binary for docker build
+        run: |
+          set -euo pipefail
+          mkdir -p docker/amd64
+          cp "target/x86_64-unknown-linux-gnu/release/wist-field-api" docker/amd64/
+          ls -R docker/amd64
+
+      - uses: docker/setup-buildx-action@v4
+
+      # 凭据在 TCR 控制台生成（访问凭证，需 push 权限），存 GitHub Secrets：TCR_USERNAME / TCR_PASSWORD。
+      - name: Login to TCR
+        uses: docker/login-action@v4
+        with:
+          registry: dy-sec.tencentcloudcr.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Build and push to TCR by digest
+        id: tcr
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          platforms: linux/amd64
+          outputs: type=image,name=dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }},push-by-digest=true,push=true
+          cache-from: type=gha,scope=field-api-amd64
+          cache-to: type=gha,mode=max,scope=field-api-amd64
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          tcr="${{ steps.tcr.outputs.digest }}"
+          [ -n "${tcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
+          printf '%s' "${tcr#sha256:}" > /tmp/digests/tcr-amd64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tcr-digests-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  tcr-arm64:
+    name: TCR (linux/arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cargo build
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: Stage binary for docker build
+        run: |
+          set -euo pipefail
+          mkdir -p docker/arm64
+          cp "target/aarch64-unknown-linux-gnu/release/wist-field-api" docker/arm64/
+          ls -R docker/arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Login to TCR
+        uses: docker/login-action@v4
+        with:
+          registry: dy-sec.tencentcloudcr.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Build and push to TCR by digest
+        id: tcr
+        uses: docker/build-push-action@v7
+        with:
+          context: docker
+          platforms: linux/arm64
+          outputs: type=image,name=dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }},push-by-digest=true,push=true
+          cache-from: type=gha,scope=field-api-arm64
+          cache-to: type=gha,mode=max,scope=field-api-arm64
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          tcr="${{ steps.tcr.outputs.digest }}"
+          [ -n "${tcr}" ] || { echo "::error::build-push 没有返回 digest"; exit 1; }
+          printf '%s' "${tcr#sha256:}" > /tmp/digests/tcr-arm64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tcr-digests-arm64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  tcr-manifest:
+    name: TCR multi-arch manifest
+    needs: [tcr-amd64, tcr-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: tcr-digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Login to TCR
+        uses: docker/login-action@v4
+        with:
+          registry: dy-sec.tencentcloudcr.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Compute image tags
+        id: meta
+        run: |
+          # 与 Release 工作流同一套 tag 规则：预发布只推该 tag，不覆盖 :latest。
+          tcr="dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}"
+          tcr_tags="${tcr}:${{ github.ref_name }}"
+          case "${{ github.ref_name }}" in
+            *-*) ;;
+            *) tcr_tags="$(printf '%s\n%s' "$tcr_tags" "$tcr:latest")" ;;
+          esac
+          printf 'tcr_tags<<__EOF__\n%s\n__EOF__\n' "$tcr_tags" >> "$GITHUB_OUTPUT"
+
+      - name: Verify per-arch digests
+        run: |
+          set -euo pipefail
+          tcr="dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}"
+          for f in /tmp/digests/tcr-*; do
+            docker buildx imagetools inspect "${tcr}@sha256:$(cat "$f")" > /dev/null
+          done
+          [ "$(find /tmp/digests -name 'tcr-*' | wc -l | tr -d ' ')" -eq 2 ] || { echo "::error::期望 2 个 TCR digest"; exit 1; }
+
+      - name: Create TCR multi-arch manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tcr_tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(-t "$tag")
+          done <<< "$TAGS"
+          sources=()
+          for f in /tmp/digests/tcr-*; do
+            sources+=("dy-sec.tencentcloudcr.com/cloud/${{ github.event.repository.name }}@sha256:$(cat "$f")")
+          done
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker buildx imagetools inspect "$tag"
+          done <<< "$TAGS"
