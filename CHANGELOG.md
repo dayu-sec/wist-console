@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 0.6.4 · 2026-11-07
+
+- **`/api/metrics` 新增「业务层」：主机集合 → 命名的逻辑单元**。`field-api.toml` 里配
+  `[[business.units]]`（`id` / `name` / `agents`），响应多一个 `business` 数组：
+  内存、进程、采集目标数**求和**，负载与磁盘使用率取**峰值**（它们本来就是单机口径，
+  相加没有意义）。另外给出 `agents_present` / `agents_reporting` / `agents_missing` ——
+  「配置里有、存储里没有」的主机不会被默默吃掉。
+- **未归类主机单列**：`unassigned_agents` 列出不在任何业务里的主机，记到页面上而不是漏掉。
+- **归属关系只存在于配置**，不下沉到数据面：agentd / wparse 的 label 契约不动，
+  改归属不用重启数据面，也不需要 `tenant_id` / `biz` label。
+- **一台主机只能属于一个业务**：跨业务共用会让投入（CPU / 内存 / 磁盘）重复计账，
+  启动时直接报错。`id` 必填且唯一，`name` 留空时退回 `id`。
+- 接口只做加法：新增字段，原有字段与语义不变；没配 `[[business.units]]` 时 `business` 是空数组。
+
 ## 0.6.3 · 2026-11-07
 
 - **`/api/metrics` 新增主机侧数据**：每台 agent 多一个 `host` 块 —— 主机名 / IP / OS / 架构 / 内核、

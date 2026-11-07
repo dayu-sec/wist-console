@@ -7,8 +7,12 @@
 //! 两条纪律：
 //! 1. 指标名只从 `wist-metrics` 的常量表取：读侧手写名字曾经把整页刷成静默空白；
 //! 2. 单位在 BFF 换算成页面口径（百分比 / 毫秒 / 字节），前端只画图不做算术。
+//!
+//! 页面的四层表达（业务 / 服务 / 中间件 / 计算资源）在这里只做前两层：
+//! 业务层来自 `field-api.toml` 的主机归属（见 [`BusinessRow`]），服务层与中间件层
+//! 由前端按 `app` label 与指标名前缀分组（无需额外查询）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use axum::Json;
@@ -21,6 +25,7 @@ use wist_metrics::names::{agent as agent_metric, label, ratio_to_percent, second
 use wist_metrics::spec::METRIC_SPECS;
 
 use crate::api::{AppState, authorize, error_response, now_ms};
+use crate::config::BusinessUnit;
 
 /// 「有没有在跳」的观察窗口（秒）：这段时间里一个样本都没有 = 采集静默。
 const SAMPLE_WINDOW_SECONDS: i64 = 300;
@@ -100,6 +105,38 @@ pub struct CatalogEntry {
     pub series: u64,
 }
 
+/// 业务层：把「主机集合」聚成一个命名的逻辑单元（用于投入产出比）。
+///
+/// 归属关系来自 `field-api.toml` 的 `[[business.units]]`，**不在指标 label 里**：
+/// 一台主机算谁的，是部署方的记账口径，不是 agentd 该知道的事。
+///
+/// 聚合口径按物理意义分开：
+/// - **求和**：内存占用、进程数、采集目标数、核数（可以跨机累加）；
+/// - **取最大值**：负载、磁盘 / 挂载点使用率（本来就是单机口径，相加没有意义）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BusinessRow {
+    pub id: String,
+    pub name: String,
+    /// 配置里声明的归属主机，顺序同配置。
+    pub agents: Vec<String>,
+    /// 其中存储里有序列的台数。
+    pub agents_present: u64,
+    /// 其中观察窗口内还在报的台数（`samples > 0`）。
+    pub agents_reporting: u64,
+    /// 配置里有、存储里没有：离线 / 从来没接入 / `agent` id 写错。
+    pub agents_missing: Vec<String>,
+    pub series: u64,
+    pub processes: Option<f64>,
+    pub cpu_cores: Option<f64>,
+    pub load_1m_max: Option<f64>,
+    pub memory_used_bytes: Option<f64>,
+    pub memory_total_bytes: Option<f64>,
+    pub disk_usage_max: Option<f64>,
+    pub filesystem_usage_max: Option<f64>,
+    pub collect_targets: Option<f64>,
+    pub collect_dropped: Option<f64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HistorySeries {
     /// 规范指标名（`agent_cpu_ratio` …），只用于排查，页面标题看 `title`。
@@ -135,7 +172,7 @@ pub async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Resp
     let Some(config) = metrics_config(&state) else {
         return not_configured();
     };
-    match collect_overview(&state.http, &config).await {
+    match collect_overview(&state.http, &config, &state.config.business).await {
         Ok(value) => Json(value).into_response(),
         Err(err) => error_response(StatusCode::BAD_GATEWAY, "metrics_unavailable", err),
     }
@@ -219,7 +256,11 @@ fn names_for(facts: &[&str]) -> String {
         .join("|")
 }
 
-async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Value, String> {
+async fn collect_overview(
+    http: &reqwest::Client,
+    base_url: &str,
+    business: &[BusinessUnit],
+) -> Result<Value, String> {
     let self_metrics = format!(
         "{{__name__=~\"{}\"}}",
         agent_metric::ALL_SELF_METRICS.join("|")
@@ -411,6 +452,8 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
         }
     }
 
+    let (business, unassigned_agents) = business_rows(business, &agents);
+
     Ok(json!({
         "generated_at_ms": now_ms(),
         "window_seconds": SAMPLE_WINDOW_SECONDS,
@@ -420,9 +463,87 @@ async fn collect_overview(http: &reqwest::Client, base_url: &str) -> Result<Valu
             "series": total_series,
             "agents": agents.len(),
         },
-        "agents": agents.into_values().collect::<Vec<_>>(),
+        "business": business,
+        "unassigned_agents": unassigned_agents,
+        "agents": agents.values().collect::<Vec<_>>(),
         "catalog": entries,
     }))
+}
+
+/// 业务层聚合：`(业务行, 未归类的主机)`。
+fn business_rows(
+    units: &[BusinessUnit],
+    agents: &BTreeMap<String, AgentRow>,
+) -> (Vec<BusinessRow>, Vec<String>) {
+    let assigned: HashSet<&str> = units
+        .iter()
+        .flat_map(|unit| unit.agents.iter().map(String::as_str))
+        .collect();
+
+    let mut rows = Vec::with_capacity(units.len());
+    for unit in units {
+        let mut row = BusinessRow {
+            id: unit.id.clone(),
+            name: unit.name.clone(),
+            agents: unit.agents.clone(),
+            ..BusinessRow::default()
+        };
+        for agent_id in &unit.agents {
+            let Some(agent) = agents.get(agent_id) else {
+                row.agents_missing.push(agent_id.clone());
+                continue;
+            };
+            row.agents_present += 1;
+            if agent.samples > 0 {
+                row.agents_reporting += 1;
+            }
+            row.series += agent.series;
+            add_option(&mut row.processes, agent.host.processes);
+            add_option(&mut row.cpu_cores, agent.cpu_cores);
+            add_option(&mut row.collect_targets, agent.collect_targets);
+            add_option(&mut row.collect_dropped, agent.collect_dropped);
+            add_option(&mut row.memory_total_bytes, agent.host.memory_total_bytes);
+            add_option(&mut row.memory_used_bytes, memory_used(&agent.host));
+            max_option(&mut row.load_1m_max, agent.host.load_1m);
+            max_option(&mut row.disk_usage_max, agent.host.disk_usage_percent);
+            max_option(
+                &mut row.filesystem_usage_max,
+                agent.host.filesystem_usage_percent,
+            );
+        }
+        rows.push(row);
+    }
+
+    let unassigned = agents
+        .keys()
+        .filter(|agent_id| !assigned.contains(agent_id.as_str()))
+        .cloned()
+        .collect();
+    (rows, unassigned)
+}
+
+/// 累加：`None` 表示「没有任何一台主机报过这个维度」，与「和为 0」是两回事。
+fn add_option(slot: &mut Option<f64>, value: Option<f64>) {
+    if let Some(value) = value {
+        *slot = Some(slot.map_or(value, |current| current + value));
+    }
+}
+
+fn max_option(slot: &mut Option<f64>, value: Option<f64>) {
+    if let Some(value) = value {
+        *slot = Some(slot.map_or(value, |current| current.max(value)));
+    }
+}
+
+/// 已用内存：优先 `total - available`（老 agentd 只报 total 时退回 `total × ratio`）。
+fn memory_used(host: &HostMetrics) -> Option<f64> {
+    match (host.memory_total_bytes, host.memory_available_bytes) {
+        (Some(total), Some(available)) => Some((total - available).max(0.0)),
+        (Some(total), None) => host
+            .memory_usage_percent
+            .map(|percent| total * percent / 100.0),
+        _ => None,
+    }
 }
 
 /// 趋势图的一行：(fact_key 或指标名, 标题, 单位, 换算)。
@@ -711,5 +832,54 @@ mod tests {
         assert_eq!(scalar(&json!({ "value": [1, "2.5"] })), Some(2.5));
         assert_eq!(scalar(&json!({ "value": [1, "NaN"] })), None);
         assert_eq!(scalar(&json!({})), None);
+    }
+
+    fn agent(id: &str, samples: u64, load_1m: f64, memory: (f64, f64)) -> AgentRow {
+        let mut row = AgentRow {
+            agent_id: id.to_string(),
+            series: 10,
+            samples,
+            cpu_cores: Some(4.0),
+            collect_targets: Some(5.0),
+            ..AgentRow::default()
+        };
+        row.host.processes = Some(3.0);
+        row.host.load_1m = Some(load_1m);
+        row.host.memory_total_bytes = Some(memory.0);
+        row.host.memory_available_bytes = Some(memory.1);
+        row.host.disk_usage_percent = Some(60.0);
+        row
+    }
+
+    #[test]
+    fn business_rows_sum_where_it_adds_up_and_keep_peaks_as_peaks() {
+        let mut agents = BTreeMap::new();
+        agents.insert("a".to_string(), agent("a", 5, 1.5, (8.0, 2.0)));
+        agents.insert("b".to_string(), agent("b", 0, 4.0, (8.0, 6.0)));
+        agents.insert("c".to_string(), agent("c", 5, 0.5, (8.0, 4.0)));
+        let units = vec![BusinessUnit {
+            id: "billing".to_string(),
+            name: "计费".to_string(),
+            agents: vec!["a".to_string(), "b".to_string(), "gone".to_string()],
+        }];
+
+        let (rows, unassigned) = business_rows(&units, &agents);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.agents_present, 2);
+        // 一台静默：业务里的「在报」不等于「有归属」。
+        assert_eq!(row.agents_reporting, 1);
+        assert_eq!(row.agents_missing, vec!["gone"]);
+        assert_eq!(row.series, 20);
+        // 可以跨机累加的量求和。
+        assert_eq!(row.processes, Some(6.0));
+        assert_eq!(row.cpu_cores, Some(8.0));
+        assert_eq!(row.memory_used_bytes, Some(8.0));
+        assert_eq!(row.memory_total_bytes, Some(16.0));
+        // 单机口径的量取峰值，不相加。
+        assert_eq!(row.load_1m_max, Some(4.0));
+        assert_eq!(row.disk_usage_max, Some(60.0));
+        // 没归属的主机单列，不默默漏掉。
+        assert_eq!(unassigned, vec!["c".to_string()]);
     }
 }

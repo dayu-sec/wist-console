@@ -45,6 +45,7 @@ fn config(base_url: String, mode: AuthMode) -> Config {
             sink_health_url: None,
             allowed_kinds: vec!["investigation_report".to_string()],
         },
+        business: Vec::new(),
     }
 }
 

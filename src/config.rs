@@ -4,6 +4,7 @@
 //! 租户、scope、敏感度上限。这三项决定 BFF 能要到什么，所以它们只出现在配置里，
 //! **不接受**浏览器传参。
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -25,6 +26,22 @@ pub struct Config {
     pub atlas: Option<AtlasConfig>,
     pub metrics: Option<MetricsConfig>,
     pub integration: IntegrationConfig,
+    /// 业务层：主机集合 → 命名的逻辑单元。空 = 还没做归属记账。
+    pub business: Vec<BusinessUnit>,
+}
+
+/// 一个业务单元（「这条业务线算谁的产出」）。
+///
+/// 业务单元 **不是** `app`：`app` 表达用途（这台机器上跑什么），业务单元表达归属
+/// （这台机器的开销算到哪条业务上）。归属关系只存在于本配置里，**不下沉到数据面**——
+/// agentd / wparse 的 label 契约不需要知道记账口径。
+#[derive(Debug, Clone)]
+pub struct BusinessUnit {
+    pub id: String,
+    /// 展示名；配置里留空时用 `id`。
+    pub name: String,
+    /// 归属主机（`agent` label 的值，形如 `agent-host-<hash>`）。
+    pub agents: Vec<String>,
 }
 
 /// 展示给运维的「数据面接入」信息。
@@ -178,6 +195,23 @@ struct RawConfig {
     metrics: Option<RawMetrics>,
     #[serde(default)]
     integration: RawIntegration,
+    #[serde(default)]
+    business: RawBusiness,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawBusiness {
+    #[serde(default)]
+    units: Vec<RawBusinessUnit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawBusinessUnit {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    agents: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,8 +444,43 @@ impl RawConfig {
                 },
                 allowed_kinds: self.integration.allowed_kinds,
             },
+            business: resolve_business(self.business)?,
         })
     }
+}
+
+fn resolve_business(raw: RawBusiness) -> anyhow::Result<Vec<BusinessUnit>> {
+    let mut ids: HashSet<String> = HashSet::new();
+    // 一台主机只能属于一个业务：跨业务共会导致投入（CPU / 内存 / 磁盘）重复计账。
+    let mut owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut units = Vec::with_capacity(raw.units.len());
+    for unit in raw.units {
+        let id = unit.id.trim().to_string();
+        if id.is_empty() {
+            bail!("business.units[].id must not be empty");
+        }
+        if !ids.insert(id.clone()) {
+            bail!("duplicate business unit id {id:?}");
+        }
+        let name = match unit.name.trim() {
+            "" => id.clone(),
+            name => name.to_string(),
+        };
+        let mut agents: Vec<String> = Vec::with_capacity(unit.agents.len());
+        for agent in unit.agents {
+            let agent = agent.trim().to_string();
+            if agent.is_empty() || agents.contains(&agent) {
+                continue;
+            }
+            if let Some(owner) = owners.get(&agent) {
+                bail!("agent {agent:?} is assigned to both business units {owner:?} and {id:?}");
+            }
+            owners.insert(agent.clone(), id.clone());
+            agents.push(agent);
+        }
+        units.push(BusinessUnit { id, name, agents });
+    }
+    Ok(units)
 }
 
 #[cfg(test)]
@@ -531,5 +600,52 @@ mod tests {
                 .to_string()
                 .contains("unresolved environment variable")
         );
+    }
+
+    #[test]
+    fn business_units_default_to_the_id_and_drop_blank_agents() {
+        let config = parse(
+            r#"
+            [auth]
+            mode = "ingress"
+            [evidence]
+            base_url = "http://x"
+            tenant = "t-001"
+
+            [[business.units]]
+            id = "billing"
+            agents = ["agent-host-a", " ", "agent-host-b"]
+            "#,
+        )
+        .expect("business units are optional");
+        assert_eq!(config.business.len(), 1);
+        assert_eq!(config.business[0].name, "billing");
+        assert_eq!(
+            config.business[0].agents,
+            vec!["agent-host-a", "agent-host-b"]
+        );
+    }
+
+    #[test]
+    fn one_agent_cannot_belong_to_two_business_units() {
+        let error = parse(
+            r#"
+            [auth]
+            mode = "ingress"
+            [evidence]
+            base_url = "http://x"
+            tenant = "t-001"
+
+            [[business.units]]
+            id = "billing"
+            agents = ["agent-host-a"]
+
+            [[business.units]]
+            id = "search"
+            agents = ["agent-host-a"]
+            "#,
+        )
+        .expect_err("shared hosts double-count投入, so they are rejected");
+        assert!(error.to_string().contains("assigned to both"), "{error}");
     }
 }
