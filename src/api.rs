@@ -412,7 +412,12 @@ async fn proxy_atlas(
         url.push_str(query);
     }
 
-    let response = match state.http.get(&url).send().await {
+    // atlas 从 0.3.4 起读接口要令牌；BFF 是唯一该拿到它的调用方。
+    let mut request = state.http.get(&url);
+    if let Some(token) = atlas.auth_token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+    let response = match request.send().await {
         Ok(response) => response,
         Err(err) => return upstream_failed(err.to_string()),
     };

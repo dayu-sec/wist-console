@@ -357,6 +357,7 @@ async fn interfaces_are_probed_when_configured() {
     let mut cfg = config(base.clone(), AuthMode::Ingress);
     cfg.atlas = Some(AtlasConfig {
         base_url: base.clone(),
+        auth_token: None,
         sink_url: None,
     });
     cfg.integration.sink_health_url = Some(format!("{base}/healthz"));
@@ -421,6 +422,7 @@ async fn atlas_is_probed_when_configured() {
     let mut cfg = config(base.clone(), AuthMode::Ingress);
     cfg.atlas = Some(AtlasConfig {
         base_url: base,
+        auth_token: None,
         sink_url: None,
     });
     let app = api::router(state(cfg));
@@ -567,6 +569,7 @@ async fn atlas_reads_go_through_the_bff() {
     let mut cfg = config(base.clone(), AuthMode::Ingress);
     cfg.atlas = Some(AtlasConfig {
         base_url: base,
+        auth_token: None,
         sink_url: None,
     });
     let app = api::router(state(cfg));

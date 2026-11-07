@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 未发布
+
+- **BFF 去读 atlas 时带令牌**：`field-api.toml` 的 `[atlas]` 新增 `auth_token`（通常是
+  `${SEC_ATLAS_API_TOKEN}`）。atlas 从 0.3.4 起读接口要 `Authorization: Bearer`；
+  浏览器仍然只持 BFF 的 `wcr_…` 令牌，atlas 的令牌只在本进程里。
+  不配 = 对面是没开鉴权的老版本 atlas。
+- 代理只发令牌，不做其他改写：atlas 的 401/404 原样透传给页面（不把上游的鉴权失败伪装成 BFF 的）。
+
 ## 0.6.4 · 2026-11-07
 
 - **`/api/metrics` 新增「业务层」：主机集合 → 命名的逻辑单元**。`field-api.toml` 里配

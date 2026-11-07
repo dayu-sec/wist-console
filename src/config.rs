@@ -105,6 +105,11 @@ pub struct EvidenceConfig {
 pub struct AtlasConfig {
     /// 资产拓扑读接口（`/healthz`、`/api/*`）。
     pub base_url: String,
+    /// 读接口的令牌（atlas 的 `WIST_ATLAS_TOKEN`）。
+    ///
+    /// atlas 从 0.3.4 起读接口要 `Authorization: Bearer`；BFF 是唯一会发这个头的调用方
+    /// （浏览器只拿 BFF 的令牌）。没配 = 对面没开鉴权（老版本 atlas）。
+    pub auth_token: Option<String>,
     /// 数据面能看到的 atlas 写端点（`http://<内网地址>:<端口>/internal/atlas`）。
     /// 与 `integration.sink_url` 同一个意思：给运维 copy，不是 BFF 自己用的地址。
     pub sink_url: Option<String>,
@@ -334,6 +339,8 @@ fn default_timeout() -> u64 {
 struct RawAtlas {
     base_url: String,
     #[serde(default)]
+    auth_token: String,
+    #[serde(default)]
     sink_url: String,
 }
 
@@ -417,6 +424,11 @@ impl RawConfig {
             atlas: match self.atlas {
                 Some(atlas) => Some(AtlasConfig {
                     base_url: expand(env, &atlas.base_url)?,
+                    auth_token: if atlas.auth_token.trim().is_empty() {
+                        None
+                    } else {
+                        Some(expand(env, &atlas.auth_token)?)
+                    },
                     sink_url: if atlas.sink_url.trim().is_empty() {
                         None
                     } else {
